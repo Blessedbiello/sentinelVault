@@ -110,7 +110,10 @@ npm install
 # Run initial setup (configures devnet, creates demo wallets)
 npm run setup    # or: bash scripts/setup-devnet.sh
 
-# Run the full multi-agent demo on devnet
+# Run the showcase demo (recommended — exercises all bounty requirements)
+npm run demo:showcase
+
+# Or run the full multi-agent demo on devnet
 npm run demo
 ```
 
@@ -119,6 +122,9 @@ npm run demo
 ```bash
 # Run the test suite to confirm everything works
 npm test
+
+# Type check
+npx tsc --noEmit
 
 # Check CLI availability
 npx ts-node src/cli/index.ts --help
@@ -147,14 +153,30 @@ Every agent operates on a structured Observe-Orient-Decide-Act cycle:
 ### 8-Layer Security Policy Engine
 
 Transactions must pass through all eight validation layers before execution:
-1. Transaction amount limits (per-transaction and daily aggregate)
-2. Rate limiting (transactions per time window)
-3. Recipient whitelist validation
-4. Time window restrictions (allowed operating hours)
-5. Token/asset type restrictions
-6. Minimum balance preservation
-7. Velocity checks (sudden spending pattern detection)
-8. Circuit breaker (automatic halt on anomalous activity)
+1. Circuit breaker (automatic halt after consecutive failures; auto-recovers after 60s)
+2. Program allowlist (reject transactions targeting unapproved programs)
+3. Address blocklist (reject transactions to explicitly blocked destinations)
+4. Per-transaction spending limit (reject any single tx exceeding the SOL cap)
+5. Hourly spending limit (reject if cumulative hourly spend exceeds threshold)
+6. Daily spending limit (reject if cumulative daily spend exceeds threshold)
+7. Weekly spending limit (reject if cumulative weekly spend exceeds threshold)
+8. Rate limits (per-minute, per-hour, and per-day transaction count caps)
+
+### SPL Token Support
+
+Full SPL token operations including creating token mints, minting tokens, transferring tokens between agent wallets, and querying token balances. Agents can hold and manage both SOL and SPL tokens independently.
+
+### Protocol Interaction (Memo Program)
+
+Agents can write on-chain memos via the Solana Memo Program v2, demonstrating the ability to interact with deployed Solana programs beyond simple SOL transfers.
+
+### Multi-Factor AI Decision Engine
+
+The TradingAgent uses a multi-factor scoring system with four independent factors — trend (SMA crossover), momentum (rate of change), volatility (inverse stddev), and balance safety — combined into a weighted composite confidence score with an explainable reasoning chain.
+
+### Agent-to-Agent Transfers
+
+Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies where agents trade with each other independently.
 
 ### Transaction Engine with Priority Queue
 
@@ -162,11 +184,11 @@ Transactions are queued with configurable priority levels, include automatic ret
 
 ### Real-Time Dashboard
 
-A web-based dashboard provides live visibility into:
-- Agent status and activity logs
-- Wallet balances and transaction history
+A web-based dashboard (http://localhost:3000) provides live visibility into:
+- Agent status cards with SOL and token balances
+- Live activity feed with WebSocket updates
+- System metrics bar (agents, transactions, volume, uptime, memory)
 - Security events and policy violations
-- System health and performance metrics
 
 ### CLI Interface
 
@@ -179,72 +201,83 @@ A full-featured command-line interface for managing wallets, agents, policies, a
 ### Creating a Wallet
 
 ```typescript
-import { KeystoreManager } from './src/core/keystore-manager';
-import { AgenticWallet } from './src/core/agentic-wallet';
+import { AgenticWallet } from './src/core/wallet';
 
-// Initialize the keystore manager
-const keystoreManager = new KeystoreManager('./keystores');
-
-// Create a new encrypted keystore
-const keystoreId = await keystoreManager.createKeystore('my-agent-wallet', {
-  password: 'strong-passphrase-here',
-});
-
-// Load the wallet from the encrypted keystore
 const wallet = new AgenticWallet({
-  keystoreManager,
-  keystoreId,
+  id: 'wallet-001',
+  label: 'My Trading Wallet',
   password: 'strong-passphrase-here',
-  network: 'devnet',
+  cluster: 'devnet',
 });
 
 await wallet.initialize();
-console.log('Wallet address:', wallet.getPublicKey().toBase58());
+console.log('Wallet address:', wallet.getPublicKey());
 console.log('Balance:', await wallet.getBalance(), 'SOL');
+
+// Request devnet SOL
+await wallet.requestAirdrop(1);
+```
+
+### SPL Token Operations
+
+```typescript
+// Create a token mint (wallet owner = mint authority)
+const mintAddress = await wallet.createTokenMint(9); // 9 decimals
+
+// Mint tokens to your own wallet
+await wallet.mintTokens(mintAddress, 1_000_000 * 10 ** 9); // 1M tokens
+
+// Transfer tokens to another wallet
+await wallet.transferToken(mintAddress, otherWalletPublicKey, 500_000 * 10 ** 9);
+
+// Check token balances
+const tokens = await wallet.getTokenBalances();
+console.log(tokens); // [{ mint, symbol, balance, decimals, uiBalance }]
+```
+
+### On-Chain Memo (Protocol Interaction)
+
+```typescript
+// Write a memo on-chain via the Memo Program v2
+const sig = await wallet.sendMemo('Agent Alpha initialized — strategy: momentum');
+console.log('Memo tx:', wallet.getExplorerUrl(sig));
 ```
 
 ### Creating and Running Agents
 
 ```typescript
-import { TradingAgent } from './src/agents/trading-agent';
-import { LiquidityAgent } from './src/agents/liquidity-agent';
 import { AgentOrchestrator } from './src/agents/orchestrator';
 
-// Create a trading agent
-const trader = new TradingAgent({
-  name: 'momentum-trader',
-  wallet,
-  strategy: {
-    type: 'momentum',
-    lookbackPeriod: 60,      // seconds
-    entryThreshold: 0.02,    // 2% price movement
-    exitThreshold: 0.01,     // 1% trailing stop
-    maxPositionSize: 1.0,    // SOL
-  },
-  decisionInterval: 5000,    // OODA cycle every 5 seconds
-});
-
-// Create a liquidity agent
-const liquidityProvider = new LiquidityAgent({
-  name: 'lp-manager',
-  wallet,
-  pool: 'SOL/USDC',
-  rangeWidth: 0.05,          // 5% range around current price
-  rebalanceThreshold: 0.03,  // rebalance at 3% drift
-});
-
-// Orchestrate multiple agents
 const orchestrator = new AgentOrchestrator();
-orchestrator.registerAgent(trader);
-orchestrator.registerAgent(liquidityProvider);
 
-// Start all agents
-await orchestrator.startAll();
-
-// Monitor agent activity
-orchestrator.on('agentAction', (event) => {
-  console.log(`[${event.agentName}] ${event.action}: ${event.details}`);
+// Create a trading agent
+const alphaId = await orchestrator.createAgent({
+  name: 'Alpha-Trader',
+  type: 'trader',
+  password: 'agent-password',
+  cluster: 'devnet',
+  strategy: {
+    name: 'Momentum',
+    type: 'momentum',
+    params: { targetAddress: otherAgentPublicKey },
+    riskLevel: 'moderate',
+    maxPositionSize: 0.01,
+    cooldownMs: 15_000,
+  },
 });
+
+// Fund and start
+await orchestrator.fundAllAgents(1);
+orchestrator.startAll();
+
+// Monitor
+orchestrator.on('agent:created', (agentId, name, type) => {
+  console.log(`Agent ${name} (${type}) created: ${agentId}`);
+});
+
+// Access agent wallets for inter-agent operations
+const wallet = orchestrator.getAgentWallet(alphaId);
+const addresses = orchestrator.getAgentWalletAddresses(); // Map<agentId, publicKey>
 ```
 
 ### Using the Policy Engine
@@ -252,62 +285,17 @@ orchestrator.on('agentAction', (event) => {
 ```typescript
 import { PolicyEngine } from './src/security/policy-engine';
 
-// Configure security policies
-const policyEngine = new PolicyEngine({
-  maxTransactionAmount: 5.0,          // SOL per transaction
-  dailySpendingLimit: 20.0,           // SOL per day
-  maxTransactionsPerMinute: 10,
-  allowedRecipients: [
-    'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',  // Raydium
-    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',  // Another DEX
-  ],
-  operatingHours: {
-    start: '00:00',
-    end: '23:59',
-    timezone: 'UTC',
-  },
-  allowedTokens: ['SOL', 'USDC', 'USDT'],
-  minimumBalance: 0.5,                // Always keep 0.5 SOL in reserve
-  velocityWindow: 300,                // 5-minute velocity check window
-  velocityThreshold: 10.0,            // SOL per velocity window
-  circuitBreakerThreshold: 3,         // consecutive failures before halt
-});
+const policy = PolicyEngine.createDefaultPolicy();
+// Default allowlist includes: System Program, SPL Token, AToken, Memo v2
 
-// Attach the policy engine to a wallet
-wallet.setPolicyEngine(policyEngine);
+// Override specific limits
+policy.spendingLimits.perTransaction = 0.5;
+policy.spendingLimits.daily = 10;
+policy.maxTransactionsPerMinute = 5;
 
-// Transactions are now automatically validated
-// A transaction that violates any policy will be rejected
-// before it reaches the network
-```
-
-### Using the Orchestrator
-
-```typescript
-import { AgentOrchestrator } from './src/agents/orchestrator';
-
-const orchestrator = new AgentOrchestrator();
-
-// Register agents with priority levels
-orchestrator.registerAgent(trader, { priority: 'high' });
-orchestrator.registerAgent(liquidityProvider, { priority: 'medium' });
-
-// Start all agents
-await orchestrator.startAll();
-
-// Get agent status
-const status = orchestrator.getStatus();
-console.log('Active agents:', status.activeAgents);
-console.log('Total transactions:', status.totalTransactions);
-
-// Pause a specific agent
-await orchestrator.pauseAgent('momentum-trader');
-
-// Resume the agent
-await orchestrator.resumeAgent('momentum-trader');
-
-// Stop all agents gracefully
-await orchestrator.stopAll();
+const engine = new PolicyEngine('agent-001', policy);
+const result = engine.validateTransaction({ amountSol: 0.3 });
+// result.allowed === true
 ```
 
 ---
@@ -408,28 +396,28 @@ Every transaction passes through eight sequential validation layers. A failure a
 Transaction Submitted
         |
         v
-[1] Amount Limit Check -----> Does this transaction exceed the per-tx limit?
+[1] Circuit Breaker --------> Has the agent exceeded consecutive failure threshold?
         |
         v
-[2] Daily Spending Check ----> Would this exceed the daily aggregate limit?
+[2] Program Allowlist ------> Is the target program in the approved set?
         |
         v
-[3] Rate Limit Check -------> Too many transactions in the current window?
+[3] Address Blocklist ------> Is the destination on the blocked list?
         |
         v
-[4] Recipient Validation ---> Is the recipient on the whitelist?
+[4] Per-Tx Limit -----------> Does this single transaction exceed the SOL cap?
         |
         v
-[5] Time Window Check ------> Are we within allowed operating hours?
+[5] Hourly Spending --------> Would this push hourly cumulative spend over limit?
         |
         v
-[6] Token Restriction ------> Is this token/asset type permitted?
+[6] Daily Spending ---------> Would this push daily cumulative spend over limit?
         |
         v
-[7] Balance Preservation ---> Will the wallet retain the minimum balance?
+[7] Weekly Spending --------> Would this push weekly cumulative spend over limit?
         |
         v
-[8] Velocity Check ---------> Does spending velocity exceed thresholds?
+[8] Rate Limits ------------> Too many transactions per minute/hour/day?
         |
         v
   Transaction Approved --> Submit to Solana
@@ -463,34 +451,32 @@ Audit logs can be exported in JSON or CSV format for external analysis.
 ```
 sentinelVault/
 ├── src/
+│   ├── index.ts             # Public barrel exports
+│   ├── types/index.ts       # All TypeScript interfaces and types
 │   ├── core/                # Wallet, keystore, and transaction engine
-│   │   ├── keystore-manager.ts
-│   │   ├── agentic-wallet.ts
+│   │   ├── keystore.ts      #   AES-256-GCM encrypted keystore manager
+│   │   ├── wallet.ts        #   AgenticWallet (SOL + SPL + Memo)
 │   │   └── transaction-engine.ts
 │   ├── security/            # Policy engine and audit logging
-│   │   ├── policy-engine.ts
-│   │   └── audit-logger.ts
+│   │   ├── policy-engine.ts #   8-layer security validation chain
+│   │   └── audit-logger.ts  #   Structured audit log with risk scoring
 │   ├── agents/              # Agent implementations and orchestrator
-│   │   ├── base-agent.ts
-│   │   ├── trading-agent.ts
-│   │   ├── liquidity-agent.ts
-│   │   └── orchestrator.ts
-│   ├── cli/                 # Command-line interface
-│   │   └── index.ts
-│   ├── dashboard/           # REST API and WebSocket server
-│   │   ├── server.ts
-│   │   └── routes.ts
-│   └── types/               # TypeScript type definitions
-│       └── index.ts
-├── tests/                   # Unit and integration tests
-│   ├── core/
-│   ├── security/
-│   └── agents/
-├── scripts/                 # Demo and setup scripts
-│   ├── demo.ts
-│   └── setup-devnet.sh
-├── keystores/               # Encrypted keystore files (gitignored)
-├── .env.example             # Environment variable template
+│   │   ├── base-agent.ts    #   Abstract OODA loop base class
+│   │   ├── trading-agent.ts #   Multi-factor AI decision trading agent
+│   │   ├── liquidity-agent.ts # Simulated LP pool management
+│   │   └── orchestrator.ts  #   Multi-agent lifecycle coordinator
+│   ├── cli/index.ts         # Commander-based CLI
+│   └── dashboard/           # REST API + WebSocket + HTML dashboard
+│       ├── server.ts
+│       └── public/index.html # Live dashboard UI
+├── tests/                   # Jest test files (*.test.ts)
+├── scripts/                 # Demo scripts
+│   ├── demo.ts              #   Full multi-agent demo
+│   ├── demo-multi-agent.ts  #   Wallet independence demo
+│   ├── demo-trading.ts      #   Single trading agent demo
+│   └── demo-showcase.ts     #   Judge-facing showcase (all bounty requirements)
+├── .sentinelvault/          # Runtime data (keystores, audit logs)
+├── .env.example
 ├── package.json
 ├── tsconfig.json
 └── README.md

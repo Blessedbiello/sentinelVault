@@ -6,7 +6,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { BaseAgent } from './base-agent';
-import { AgentConfig, AgentDecision, AgentAction } from '../types';
+import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
 import { AgenticWallet } from '../core/wallet';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ export class TradingAgent extends BaseAgent {
 
   // ── Strategy configuration ─────────────────────────────────────────────────
 
-  private readonly targetAddress: string;
+  private targetAddress: string;
   private readonly maxTradeAmount: number;
   private readonly strategyType: TradingStrategyType;
 
@@ -169,12 +169,32 @@ export class TradingAgent extends BaseAgent {
     return observations as unknown as Record<string, unknown>;
   }
 
+  // ── Statistical Helpers (Multi-factor) ────────────────────────────────────
+
+  /**
+   * Compute the standard deviation of a numeric array.
+   * Returns 0 if the array has fewer than 2 elements.
+   */
+  private stddev(arr: number[]): number {
+    if (arr.length < 2) return 0;
+    const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+    const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
+    return Math.sqrt(variance);
+  }
+
   // ── OODA Phase 2 — Analyze ────────────────────────────────────────────────
 
   /**
-   * Apply the configured strategy to the latest observations and produce a
-   * structured AgentDecision.  Short-circuit: if priceHistory is empty the
-   * decision defaults to 'hold' with minimal confidence.
+   * Multi-factor scoring system that produces a structured AgentDecision.
+   *
+   * Computes four independent factors:
+   *   1. trendScore     — SMA crossover direction and magnitude (0-1)
+   *   2. momentumScore  — rate of price change over recent periods (0-1)
+   *   3. volatilityScore — inverse of stddev; penalizes high volatility (0-1)
+   *   4. balanceScore   — penalizes when balance < 0.05 SOL (0-1)
+   *
+   * Weighted confidence = 0.4*trend + 0.3*momentum + 0.2*volatility + 0.1*balance
+   * Each factor contributes to an explainable reasoning chain.
    */
   protected async analyze(observations: Record<string, unknown>): Promise<AgentDecision> {
     const obs = observations as unknown as TradingObservations;
@@ -183,44 +203,85 @@ export class TradingAgent extends BaseAgent {
     const sma20 = this.sma(SMA_SHORT_PERIOD);
     const sma50 = this.sma(SMA_LONG_PERIOD);
 
+    // ── Factor 1: Trend Score ─────────────────────────────────────────────
+    // Measures how strongly the short SMA has crossed above/below the long SMA.
+    const smaDiff = (sma20 - sma50) / Math.max(sma50, 0.0001);
+    const trendScore = Math.min(1, Math.max(0, 0.5 + smaDiff * 5));
+    const trendDirection = trendScore > 0.55 ? 'bullish' : trendScore < 0.45 ? 'bearish' : 'neutral';
+
+    // ── Factor 2: Momentum Score ──────────────────────────────────────────
+    // Rate of price change over the most recent 5 ticks.
+    const recentPrices = this.priceHistory.slice(-5);
+    let momentumScore = 0.5;
+    if (recentPrices.length >= 2) {
+      const priceChange = (recentPrices[recentPrices.length - 1] - recentPrices[0]) / Math.max(recentPrices[0], 0.0001);
+      momentumScore = Math.min(1, Math.max(0, 0.5 + priceChange * 10));
+    }
+
+    // ── Factor 3: Volatility Score ────────────────────────────────────────
+    // Low volatility = high score (stable is better for entry).
+    const recentWindow = this.priceHistory.slice(-20);
+    const vol = this.stddev(recentWindow);
+    const normalizedVol = vol / Math.max(price, 0.0001);
+    const volatilityScore = Math.min(1, Math.max(0, 1 - normalizedVol * 20));
+
+    // ── Factor 4: Balance Score ───────────────────────────────────────────
+    // Penalize when balance is too low to trade safely.
+    const balanceScore = balance >= 0.05 ? 1.0 : Math.max(0, balance / 0.05);
+
+    // ── Weighted Confidence ───────────────────────────────────────────────
+    const rawConfidence =
+      0.4 * trendScore +
+      0.3 * momentumScore +
+      0.2 * volatilityScore +
+      0.1 * balanceScore;
+
+    // ── Reasoning Chain ───────────────────────────────────────────────────
+    const reasoningChain: string[] = [
+      `[Trend]      score=${trendScore.toFixed(3)} (${trendDirection}) — SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)}, SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}, diff=${(smaDiff * 100).toFixed(2)}%`,
+      `[Momentum]   score=${momentumScore.toFixed(3)} — price change over last ${recentPrices.length} ticks`,
+      `[Volatility] score=${volatilityScore.toFixed(3)} — stddev=${vol.toFixed(6)}, normalized=${(normalizedVol * 100).toFixed(2)}%`,
+      `[Balance]    score=${balanceScore.toFixed(3)} — ${balance.toFixed(6)} SOL available`,
+      `[Composite]  confidence=${rawConfidence.toFixed(3)} = 0.4×${trendScore.toFixed(3)} + 0.3×${momentumScore.toFixed(3)} + 0.2×${volatilityScore.toFixed(3)} + 0.1×${balanceScore.toFixed(3)}`,
+    ];
+
+    // ── Strategy-specific action decision ─────────────────────────────────
     let action: 'buy' | 'sell' | 'hold';
     let confidence: number;
     let reasoning: string;
 
     switch (this.strategyType) {
       case 'dca': {
-        // Dollar-Cost Averaging: buy unconditionally on every cycle.
         action = 'buy';
-        confidence = DCA_CONFIDENCE;
+        confidence = Math.max(DCA_CONFIDENCE, rawConfidence);
         reasoning =
-          `DCA strategy: accumulate regardless of market direction. ` +
-          `Current price: ${price.toFixed(4)} SOL.`;
+          `DCA strategy: accumulate regardless of direction. Price: ${price.toFixed(4)} SOL. ` +
+          `Multi-factor confidence: ${rawConfidence.toFixed(3)}.`;
+        reasoningChain.push(`[Decision]   DCA always buys — confidence boosted to ${confidence.toFixed(3)}`);
         break;
       }
 
       case 'momentum': {
-        // Trend-following: compare short SMA to long SMA.
-        if (sma20 > sma50 && price > sma20) {
+        if (rawConfidence > 0.55 && trendDirection === 'bullish') {
           action = 'buy';
-          confidence = MOMENTUM_CONFIDENCE;
+          confidence = rawConfidence;
           reasoning =
-            `Momentum bullish: SMA${SMA_SHORT_PERIOD} (${sma20.toFixed(4)}) > ` +
-            `SMA${SMA_LONG_PERIOD} (${sma50.toFixed(4)}) and price (${price.toFixed(4)}) ` +
-            `is above the short-term average. Trend continuation expected.`;
-        } else if (sma20 < sma50 && price < sma20) {
+            `Momentum bullish: composite score ${rawConfidence.toFixed(3)} with uptrend. ` +
+            `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} > SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
+          reasoningChain.push(`[Decision]   BUY — bullish trend with confidence ${confidence.toFixed(3)}`);
+        } else if (rawConfidence < 0.45 && trendDirection === 'bearish') {
           action = 'sell';
-          confidence = MOMENTUM_CONFIDENCE;
+          confidence = 1 - rawConfidence; // invert: low composite → high sell confidence
           reasoning =
-            `Momentum bearish: SMA${SMA_SHORT_PERIOD} (${sma20.toFixed(4)}) < ` +
-            `SMA${SMA_LONG_PERIOD} (${sma50.toFixed(4)}) and price (${price.toFixed(4)}) ` +
-            `is below the short-term average. Downtrend continuation expected.`;
+            `Momentum bearish: composite score ${rawConfidence.toFixed(3)} with downtrend. ` +
+            `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} < SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
+          reasoningChain.push(`[Decision]   SELL — bearish trend with confidence ${confidence.toFixed(3)}`);
         } else {
           action = 'hold';
           confidence = HOLD_CONFIDENCE;
           reasoning =
-            `Momentum indeterminate: SMAs are converging or price is between averages. ` +
-            `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)}, SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}, ` +
-            `price=${price.toFixed(4)}. Holding position.`;
+            `Momentum indeterminate: composite ${rawConfidence.toFixed(3)}, trend ${trendDirection}. Holding.`;
+          reasoningChain.push(`[Decision]   HOLD — no clear signal`);
         }
         break;
       }
@@ -230,29 +291,27 @@ export class TradingAgent extends BaseAgent {
         const sellLevel = this.basePrice * MEAN_REVERSION_SELL_THRESHOLD;
 
         if (price < buyLevel) {
-          // Confidence scales with how far below the buy level price has fallen.
           const deviation = (buyLevel - price) / this.basePrice;
-          confidence = Math.min(0.95, 0.6 + deviation * 10);
+          confidence = Math.min(0.95, rawConfidence + deviation * 5);
           action = 'buy';
           reasoning =
-            `Mean reversion: price (${price.toFixed(4)}) is ${(deviation * 100).toFixed(2)} % ` +
-            `below the buy threshold (${buyLevel.toFixed(4)}). ` +
-            `Expecting reversion toward base price ${this.basePrice.toFixed(4)}.`;
+            `Mean reversion: price ${price.toFixed(4)} below buy threshold ${buyLevel.toFixed(4)} ` +
+            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${rawConfidence.toFixed(3)}.`;
+          reasoningChain.push(`[Decision]   BUY — price below mean reversion threshold, confidence ${confidence.toFixed(3)}`);
         } else if (price > sellLevel) {
-          // Confidence scales with how far above the sell level price has risen.
           const deviation = (price - sellLevel) / this.basePrice;
-          confidence = Math.min(0.95, 0.6 + deviation * 10);
+          confidence = Math.min(0.95, (1 - rawConfidence) + deviation * 5);
           action = 'sell';
           reasoning =
-            `Mean reversion: price (${price.toFixed(4)}) is ${(deviation * 100).toFixed(2)} % ` +
-            `above the sell threshold (${sellLevel.toFixed(4)}). ` +
-            `Expecting reversion toward base price ${this.basePrice.toFixed(4)}.`;
+            `Mean reversion: price ${price.toFixed(4)} above sell threshold ${sellLevel.toFixed(4)} ` +
+            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${rawConfidence.toFixed(3)}.`;
+          reasoningChain.push(`[Decision]   SELL — price above mean reversion threshold, confidence ${confidence.toFixed(3)}`);
         } else {
           action = 'hold';
           confidence = HOLD_CONFIDENCE;
           reasoning =
-            `Mean reversion: price (${price.toFixed(4)}) is within the neutral zone ` +
-            `[${buyLevel.toFixed(4)}, ${sellLevel.toFixed(4)}]. No edge present — holding.`;
+            `Mean reversion: price ${price.toFixed(4)} in neutral zone [${buyLevel.toFixed(4)}, ${sellLevel.toFixed(4)}]. Holding.`;
+          reasoningChain.push(`[Decision]   HOLD — price in neutral zone`);
         }
         break;
       }
@@ -269,10 +328,16 @@ export class TradingAgent extends BaseAgent {
         balance,
         strategyType: this.strategyType,
         priceHistoryLength: this.priceHistory.length,
+        trendScore,
+        momentumScore,
+        volatilityScore,
+        balanceScore,
+        compositeConfidence: rawConfidence,
+        reasoningChain,
       },
       analysis: `Strategy: ${this.strategyType} | Price: ${price.toFixed(4)} | ` +
         `SMA20: ${sma20.toFixed(4)} | SMA50: ${sma50.toFixed(4)} | ` +
-        `Balance: ${balance.toFixed(6)} SOL`,
+        `Composite: ${rawConfidence.toFixed(3)} | Balance: ${balance.toFixed(6)} SOL`,
       action,
       confidence,
       reasoning,
@@ -354,6 +419,31 @@ export class TradingAgent extends BaseAgent {
     return action;
   }
 
+  // ── Public Setters ──────────────────────────────────────────────────────────
+
+  /** Update the destination address for trades (e.g. for agent-to-agent wiring). */
+  setTargetAddress(address: string): void {
+    this.targetAddress = address;
+  }
+
+  // ── Policy Engine Integration ──────────────────────────────────────────────
+
+  /** Estimate transaction params so the policy engine can validate before execution. */
+  protected estimateTransactionParams(
+    decision: AgentDecision,
+  ): TransactionValidationParams | null {
+    if (decision.action === 'hold') return null;
+
+    const balance = (decision.marketConditions.balance as number) ?? 0;
+    const amount = Math.min(this.maxTradeAmount, balance * MAX_TRADE_BALANCE_FRACTION);
+
+    return {
+      amountSol: amount,
+      programId: DEVNET_FALLBACK_ADDRESS, // System Program (SOL transfer)
+      destination: this.targetAddress,
+    };
+  }
+
   // ── OODA Phase 4 — Evaluate ───────────────────────────────────────────────
 
   /**
@@ -377,30 +467,17 @@ export class TradingAgent extends BaseAgent {
     const amountSol = action.details.amountSol as number;
     const confirmed = action.result?.status === 'confirmed';
 
-    // Accumulate trade volume regardless of confirmation status.
+    // Accumulate trade volume. Transaction counters (successful/failed) are
+    // handled by BaseAgent.wireWalletEvents() — do NOT increment here to
+    // avoid double-counting.
     this.performance.totalVolumeSol += amountSol;
-
-    if (confirmed) {
-      this.performance.successfulTransactions += 1;
-    } else {
-      this.performance.failedTransactions += 1;
-    }
-
-    // Recompute win rate from updated counters.
-    const totalSettled =
-      this.performance.successfulTransactions + this.performance.failedTransactions;
-    this.performance.winRate =
-      totalSettled > 0
-        ? this.performance.successfulTransactions / totalSettled
-        : 0;
 
     console.log(
       `[${this.config.name}] Decision ${decision.id} evaluated. ` +
       `Action: ${decision.action}, Amount: ${amountSol.toFixed(6)} SOL, ` +
       `Confirmed: ${confirmed}, ` +
       `Signature: ${action.result?.signature ?? 'N/A'}, ` +
-      `Total volume: ${this.performance.totalVolumeSol.toFixed(6)} SOL, ` +
-      `Win rate: ${(this.performance.winRate * 100).toFixed(1)} %.`,
+      `Total volume: ${this.performance.totalVolumeSol.toFixed(6)} SOL.`,
     );
   }
 }

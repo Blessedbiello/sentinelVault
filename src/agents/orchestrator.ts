@@ -177,6 +177,10 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     const agent = this.instantiateAgent(agentConfig, wallet);
 
+    // ── Policy Engine Wiring ──────────────────────────────────────────────────
+
+    agent.setPolicyEngine(policyEngine);
+
     // ── Event Wiring ──────────────────────────────────────────────────────────
 
     this.wireAgentEvents(agent, wallet);
@@ -489,6 +493,24 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
   /** Return a copy of the accumulated alert log. */
   getAlerts(): AlertEntry[] {
     return [...this.alerts];
+  }
+
+  /** Return the wallet for a specific agent. */
+  getAgentWallet(agentId: string): AgenticWallet {
+    const entry = this.requireAgent(agentId);
+    return entry.wallet;
+  }
+
+  /** Return a map of agentId → public key for all registered agents. */
+  getAgentWalletAddresses(): Map<string, string> {
+    const result = new Map<string, string>();
+    for (const [agentId, { wallet }] of this.agents.entries()) {
+      const state = wallet.getState();
+      if (state) {
+        result.set(agentId, state.publicKey);
+      }
+    }
+    return result;
   }
 
   // ── Shutdown ──────────────────────────────────────────────────────────────

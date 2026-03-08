@@ -4,7 +4,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { BaseAgent } from './base-agent';
-import { AgentConfig, AgentDecision, AgentAction } from '../types';
+import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
 import { AgenticWallet } from '../core/wallet';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -66,9 +66,17 @@ interface PoolState {
  */
 export class LiquidityAgent extends BaseAgent {
   private pool: PoolState;
+  private targetAddress: string;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super(config, wallet);
+
+    // Resolve destination address from strategy params, falling back to System Program.
+    const rawTarget = config.strategy.params.targetAddress;
+    this.targetAddress =
+      typeof rawTarget === 'string' && rawTarget.length > 0
+        ? rawTarget
+        : SYSTEM_PROGRAM_ADDRESS;
 
     this.pool = {
       tokenABalance: 10,
@@ -231,7 +239,7 @@ export class LiquidityAgent extends BaseAgent {
       switch (actionType) {
         case 'rebalance': {
           const signature = await this.wallet.transferSOL(
-            SYSTEM_PROGRAM_ADDRESS,
+            this.targetAddress,
             REBALANCE_TRANSFER_SOL,
           );
 
@@ -245,7 +253,7 @@ export class LiquidityAgent extends BaseAgent {
             type: 'rebalance',
             details: {
               amountSol: REBALANCE_TRANSFER_SOL,
-              destination: SYSTEM_PROGRAM_ADDRESS,
+              destination: this.targetAddress,
               signature,
               newImbalance: this.pool.imbalance,
               tvl: this.pool.tvl,
@@ -255,7 +263,7 @@ export class LiquidityAgent extends BaseAgent {
 
         case 'add_liquidity': {
           const signature = await this.wallet.transferSOL(
-            SYSTEM_PROGRAM_ADDRESS,
+            this.targetAddress,
             ADD_LIQUIDITY_TRANSFER_SOL,
           );
 
@@ -269,7 +277,7 @@ export class LiquidityAgent extends BaseAgent {
             type: 'add_liquidity',
             details: {
               amountSol: ADD_LIQUIDITY_TRANSFER_SOL,
-              destination: SYSTEM_PROGRAM_ADDRESS,
+              destination: this.targetAddress,
               signature,
               newTokenABalance: this.pool.tokenABalance,
               tvl: this.pool.tvl,
@@ -326,18 +334,14 @@ export class LiquidityAgent extends BaseAgent {
   ): Promise<void> {
     if (action === null) {
       if (decision.action !== 'hold') {
-        // Execution was attempted but failed
-        this.updatePerformance({
-          failedTransactions: this.performance.failedTransactions + 1,
-          totalTransactions: this.performance.totalTransactions + 1,
-        });
-
         console.warn(
           `[LiquidityAgent:${this.config.id}] Decision "${decision.action}" ` +
           `(confidence: ${decision.confidence.toFixed(2)}) produced no action.`,
         );
       }
-      // 'hold' decisions are expected and not counted as failures
+      // 'hold' decisions are expected and not counted as failures.
+      // Transaction counters (successful/failed) are handled by
+      // BaseAgent.wireWalletEvents() — do NOT increment here.
       return;
     }
 
@@ -348,9 +352,9 @@ export class LiquidityAgent extends BaseAgent {
       ? (action.details.amountSol as number)
       : 0;
 
+    // Only track volume here. Transaction counters are handled by
+    // BaseAgent.wireWalletEvents() to avoid double-counting.
     this.updatePerformance({
-      successfulTransactions: this.performance.successfulTransactions + 1,
-      totalTransactions: this.performance.totalTransactions + 1,
       totalVolumeSol: this.performance.totalVolumeSol + amountSol,
     });
 
@@ -361,6 +365,32 @@ export class LiquidityAgent extends BaseAgent {
       `APY: ${this.pool.apy.toFixed(2)}% | ` +
       `Fees earned: ${this.pool.feesEarned.toFixed(6)} SOL`,
     );
+  }
+
+  // ── Public Setters ──────────────────────────────────────────────────────────
+
+  /** Update the destination address (e.g. for agent-to-agent wiring). */
+  setTargetAddress(address: string): void {
+    this.targetAddress = address;
+  }
+
+  // ── Policy Engine Integration ──────────────────────────────────────────────
+
+  /** Estimate transaction params so the policy engine can validate before execution. */
+  protected estimateTransactionParams(
+    decision: AgentDecision,
+  ): TransactionValidationParams | null {
+    if (decision.action === 'hold' || decision.action === 'remove_liquidity') return null;
+
+    const amountSol = decision.action === 'rebalance'
+      ? REBALANCE_TRANSFER_SOL
+      : ADD_LIQUIDITY_TRANSFER_SOL;
+
+    return {
+      amountSol,
+      programId: SYSTEM_PROGRAM_ADDRESS, // System Program (SOL transfer)
+      destination: this.targetAddress,
+    };
   }
 
   // ── Public Accessors ─────────────────────────────────────────────────────────

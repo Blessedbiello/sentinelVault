@@ -10,8 +10,10 @@ import {
   AgentDecision,
   AgentAction,
   AgentPerformance,
+  TransactionValidationParams,
 } from '../types';
 import { AgenticWallet } from '../core/wallet';
+import { PolicyEngine } from '../security/policy-engine';
 
 // ─── Event Map ────────────────────────────────────────────────────────────────
 
@@ -44,6 +46,7 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   protected readonly wallet: AgenticWallet;
   protected performance: AgentPerformance;
 
+  private policyEngine: PolicyEngine | null = null;
   private status: AgentStatus;
   private startedAt: number;
   private uptime: number;
@@ -131,10 +134,34 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
       let action: AgentAction | null = null;
 
       if (shouldExecute) {
+        // ── Policy gate ───────────────────────────────────────────────────────
+        if (this.policyEngine) {
+          const txParams = this.estimateTransactionParams(decision);
+          if (txParams) {
+            const validation = this.policyEngine.validateTransaction(txParams);
+            if (!validation.allowed) {
+              decision.executed = false;
+              this.decisionHistory.push(decision);
+              this.emit('agent:decision', decision);
+              return;
+            }
+          }
+        }
+
         // ── Execute ────────────────────────────────────────────────────────────
         this.status = 'executing';
         action = await this.execute(decision);
-        decision.executed = true;
+        decision.executed = action !== null;
+
+        // ── Record outcome in policy engine ────────────────────────────────────
+        if (this.policyEngine && action !== null) {
+          const amountSol = (action.details.amountSol as number) ?? 0;
+          if (action.result?.status === 'confirmed') {
+            this.policyEngine.recordTransaction(amountSol);
+          } else {
+            this.policyEngine.recordFailure();
+          }
+        }
       } else {
         decision.executed = false;
       }
@@ -285,7 +312,30 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
     return [...this.decisionHistory];
   }
 
+  // ── Policy Engine ──────────────────────────────────────────────────────────
+
+  /**
+   * Attach a PolicyEngine to this agent. When set, every transaction is
+   * validated against the policy chain before execution.
+   */
+  setPolicyEngine(engine: PolicyEngine): void {
+    this.policyEngine = engine;
+  }
+
   // ── Protected Helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Estimate the transaction parameters for a pending decision so the
+   * policy engine can validate before execution. Subclasses should override
+   * to provide accurate amountSol, programId, and destination.
+   *
+   * Return null to skip policy validation for this decision.
+   */
+  protected estimateTransactionParams(
+    _decision: AgentDecision,
+  ): TransactionValidationParams | null {
+    return null;
+  }
 
   /**
    * Merge partial performance updates into the tracked metrics. Subclasses

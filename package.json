@@ -16,6 +16,7 @@
     "demo:multi": "ts-node scripts/demo-multi-agent.ts",
     "demo:trade": "ts-node scripts/demo-trading.ts",
     "dashboard": "ts-node src/dashboard/server.ts",
+    "demo:showcase": "ts-node scripts/demo-showcase.ts",
     "test": "jest --verbose",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

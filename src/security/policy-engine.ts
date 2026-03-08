@@ -258,7 +258,12 @@ export class PolicyEngine extends EventEmitter<PolicyEngineEvents> {
         weekly:         100,  // 100 SOL per week
         monthly:        500,  // 500 SOL per month
       },
-      allowedPrograms:         [SYSTEM_PROGRAM_ID],
+      allowedPrograms: [
+        SYSTEM_PROGRAM_ID,
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',    // SPL Token Program
+        'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',    // Associated Token Program
+        'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',     // Memo Program v2
+      ],
       blockedAddresses:        [],
       requireSimulation:       true,
       maxTransactionsPerMinute: 10,

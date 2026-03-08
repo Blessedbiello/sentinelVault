@@ -4,10 +4,11 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import path from 'path';
 import { Server as WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import { AgentOrchestrator } from '../agents/orchestrator';
-import { PolicyEngine } from '../security/policy-engine';
+import { AgentType, AuditQueryFilters, StrategyConfig } from '../types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,7 @@ export class DashboardServer {
   private configureMiddleware(): void {
     this.app.use(cors());
     this.app.use(express.json());
+    this.app.use(express.static(path.join(__dirname, 'public')));
   }
 
   /** Register all REST route handlers. */
@@ -120,20 +122,24 @@ export class DashboardServer {
 
     this.app.post('/api/agents', async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const { name, type, strategy, password, cluster } = req.body as {
-          name: string;
-          type: string;
-          strategy: unknown;
-          password: string;
-          cluster?: string;
-        };
+        const { name, type, password, strategy, cluster } = req.body as Record<string, unknown>;
+
+        if (typeof name !== 'string' || typeof type !== 'string' || typeof password !== 'string') {
+          res.status(400).json({ error: 'Missing required fields: name, type, password' });
+          return;
+        }
+
+        if (strategy !== undefined && (typeof strategy !== 'object' || strategy === null)) {
+          res.status(400).json({ error: 'Invalid strategy: must be an object' });
+          return;
+        }
 
         const id = await this.orchestrator.createAgent({
           name,
-          type: type as any,
-          strategy: strategy as any,
+          type: type as AgentType,
+          strategy: strategy as StrategyConfig,
           password,
-          cluster: cluster as any,
+          cluster: (typeof cluster === 'string' ? cluster : 'devnet') as 'devnet' | 'testnet' | 'mainnet-beta',
         });
 
         res.status(201).json({ id, message: `Agent "${name}" created successfully.` });
@@ -216,7 +222,7 @@ export class DashboardServer {
           }
         }
 
-        const entries = this.orchestrator.getAuditLogger().query(filters as any);
+        const entries = this.orchestrator.getAuditLogger().query(filters as AuditQueryFilters);
         res.json(entries);
       } catch (err) {
         next(err);

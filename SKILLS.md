@@ -10,10 +10,14 @@ integrate with, or operate the SentinelVault framework programmatically.
 SentinelVault is an autonomous AI agent wallet framework for Solana. It provides:
 
 - **Encrypted wallet management** -- Create, fund, lock/unlock Solana wallets with AES-256-GCM encrypted keystores. Private keys are decrypted on demand and wiped from memory immediately after use.
+- **SPL token operations** -- Create token mints, mint tokens, transfer tokens between agent wallets, and query token balances using `@solana/spl-token`.
+- **Protocol interaction (Memo Program)** -- Write on-chain memos via the Solana Memo Program v2, demonstrating dApp/protocol interaction beyond simple SOL transfers.
+- **Agent-to-agent interaction** -- Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies.
+- **Multi-factor AI decisions** -- TradingAgent uses a four-factor scoring system (trend, momentum, volatility, balance) with explainable reasoning chains.
 - **Autonomous agent orchestration** -- Spin up multiple independent AI agents, each with its own wallet, security policy, and trading strategy. An orchestrator manages lifecycle, health checks, and metrics aggregation.
 - **OODA decision loop** -- Every agent runs a continuous Observe-Orient-Decide-Act cycle. Concrete strategies (DCA, momentum, mean reversion, liquidity provision) are pluggable via abstract method overrides.
-- **8-layer security policy engine** -- All outbound transactions pass through a configurable chain of validation checks before reaching the network.
-- **Real-time dashboard** -- REST API + WebSocket push server for monitoring agent states, system metrics, audit logs, and alerts.
+- **8-layer security policy engine** -- All outbound transactions pass through a configurable chain of validation checks before reaching the network. Default allowlist includes System Program, SPL Token, AToken, and Memo v2.
+- **Real-time dashboard** -- HTML dashboard + REST API + WebSocket push server for monitoring agent states, system metrics, audit logs, and alerts. Open http://localhost:3000 in a browser.
 - **Full audit trail** -- Every wallet operation, agent decision, security event, and transaction is logged with risk scores and queryable filters.
 - **CLI interface** -- Command-line tool for status checks, agent management, and wallet operations.
 
@@ -36,6 +40,43 @@ const wallet = new AgenticWallet({
 await wallet.initialize();
 await wallet.requestAirdrop(1); // 1 SOL on devnet
 const balance = await wallet.getBalance();
+```
+
+### SPL token operations
+
+```typescript
+// Create a new SPL token mint (wallet owner = mint authority + freeze authority)
+const mintAddress = await wallet.createTokenMint(9); // 9 decimals
+
+// Mint tokens to your own associated token account
+await wallet.mintTokens(mintAddress, 1_000_000 * 10 ** 9); // 1M tokens
+
+// Transfer tokens to another wallet (creates destination ATA if needed)
+await wallet.transferToken(mintAddress, destinationPublicKey, 500_000 * 10 ** 9);
+
+// Query all SPL token balances
+const tokens = await wallet.getTokenBalances();
+// Returns: TokenBalance[] with { mint, symbol, balance, decimals, uiBalance }
+```
+
+### On-chain memo (protocol interaction)
+
+```typescript
+// Write a memo on-chain via Memo Program v2
+const sig = await wallet.sendMemo('Agent Alpha initialized — strategy: momentum');
+console.log('Explorer:', wallet.getExplorerUrl(sig));
+```
+
+### Agent-to-agent interaction
+
+```typescript
+// Access agent wallets through the orchestrator
+const alphaWallet = orchestrator.getAgentWallet(alphaId);
+const addresses = orchestrator.getAgentWalletAddresses(); // Map<agentId, publicKey>
+
+// Wire agents to target each other
+const betaPublicKey = orchestrator.getAgentWallet(betaId).getPublicKey();
+// Pass as strategy.params.targetAddress when creating the agent
 ```
 
 ### Create an agent via the orchestrator
@@ -228,9 +269,8 @@ Each strategy accepts a `riskLevel` parameter: `conservative`, `moderate`, or `a
 - **Devnet only** -- The framework is designed and tested for Solana devnet. Mainnet usage requires significant policy hardening and has not been validated.
 - **Simulated prices** -- The TradingAgent uses a local random-walk price simulation, not real market data. The LiquidityAgent simulates pool state internally.
 - **0.01 SOL trade cap** -- Each TradingAgent trade is hard-capped at 0.01 SOL (and never more than 10% of wallet balance) to protect devnet funds.
-- **No real DEX integration** -- Trades are SOL transfers to a target address, not actual swaps on a DEX.
-- **SPL token support is placeholder** -- `transferToken()` and `getTokenBalances()` are declared but throw or return empty arrays.
+- **No real DEX integration** -- Trades are SOL transfers to a target address, not actual swaps on a DEX. SPL token operations use real on-chain mint/transfer via `@solana/spl-token`.
 - **Arbitrageur and portfolio manager** -- These agent types fall back to TradingAgent; dedicated implementations are not yet available.
 - **Single-process** -- All agents run in a single Node.js process. No distributed coordination or persistence across restarts.
 - **No mainnet safeguards** -- There is no multi-sig, hardware wallet integration, or human-in-the-loop approval workflow.
-- **Airdrop rate limits** -- Devnet airdrops are rate-limited by Solana. Sequential funding with 2-second delays is used, but failures are possible under load.
+- **Airdrop rate limits** -- Devnet airdrops are rate-limited by Solana. Sequential funding with 5-second delays is used, but failures are possible under load.

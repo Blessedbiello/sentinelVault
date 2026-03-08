@@ -7,11 +7,20 @@ import {
   Connection,
   Keypair,
   Transaction,
+  TransactionInstruction,
   SystemProgram,
   PublicKey,
   LAMPORTS_PER_SOL,
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
+import {
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+  transfer as splTransfer,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
 import { KeystoreManager } from './keystore';
 import {
   WalletConfig,
@@ -20,6 +29,9 @@ import {
   SolanaCluster,
   TokenBalance,
 } from '../types';
+
+/** Memo Program v2 address. */
+const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -149,11 +161,34 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   }
 
   /**
-   * Placeholder for SPL token balance lookup.
-   * Returns an empty array until full SPL token integration is implemented.
+   * Fetch all SPL token accounts owned by this wallet and return their balances.
+   * Updates the internal wallet state with the latest token balances.
    */
   async getTokenBalances(): Promise<TokenBalance[]> {
-    return [];
+    this.assertReady();
+
+    const pubkey = new PublicKey(this.state!.publicKey);
+    const response = await this.connection!.getParsedTokenAccountsByOwner(pubkey, {
+      programId: TOKEN_PROGRAM_ID,
+    });
+
+    const balances: TokenBalance[] = response.value.map((account) => {
+      const parsed = account.account.data.parsed.info;
+      const mintAddress: string = parsed.mint;
+      const tokenAmount = parsed.tokenAmount;
+
+      return {
+        mint: mintAddress,
+        symbol: mintAddress.slice(0, 6),
+        balance: Number(tokenAmount.amount),
+        decimals: tokenAmount.decimals,
+        uiBalance: tokenAmount.uiAmountString ?? '0',
+      };
+    });
+
+    this.state!.tokenBalances = balances;
+    this.state!.lastActivity = Date.now();
+    return balances;
   }
 
   // ── Transaction Methods ─────────────────────────────────────────────────────
@@ -181,15 +216,154 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   }
 
   /**
-   * Placeholder for SPL token transfers.
-   * Throws until the feature is implemented.
+   * Transfer SPL tokens to a destination wallet. Automatically creates the
+   * destination's associated token account if it does not exist.
+   *
+   * @param mint        - The token mint address.
+   * @param destination - The destination wallet public key (not ATA).
+   * @param amount      - Amount in raw token units (not UI amount).
    */
   async transferToken(
-    _mint: string,
-    _destination: string,
-    _amount: number,
+    mint: string,
+    destination: string,
+    amount: number,
   ): Promise<string> {
-    throw new Error('SPL token transfers not yet implemented');
+    this.assertReady();
+
+    const connection = this.connection!;
+    const mintPubkey = new PublicKey(mint);
+    const destPubkey = new PublicKey(destination);
+
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const senderATA = await getOrCreateAssociatedTokenAccount(
+        connection, keypair, mintPubkey, keypair.publicKey,
+      );
+
+      const destATA = await getOrCreateAssociatedTokenAccount(
+        connection, keypair, mintPubkey, destPubkey,
+      );
+
+      const signature = await splTransfer(
+        connection, keypair, senderATA.address, destATA.address, keypair, amount,
+      );
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+      this.emit('transaction:confirmed', signature);
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Create a new SPL token mint. The wallet owner becomes both the mint
+   * authority and freeze authority.
+   *
+   * @param decimals - Number of decimal places (default: 9).
+   * @returns The mint address as a base58 string.
+   */
+  async createTokenMint(decimals: number = 9): Promise<string> {
+    this.assertReady();
+
+    const connection = this.connection!;
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const mint = await createMint(
+        connection,
+        keypair,
+        keypair.publicKey,
+        keypair.publicKey,
+        decimals,
+      );
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+
+      return mint.toBase58();
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Mint new tokens to the wallet owner's associated token account.
+   *
+   * @param mintAddress - The token mint address.
+   * @param amount      - Amount in raw token units to mint.
+   * @returns The transaction signature.
+   */
+  async mintTokens(mintAddress: string, amount: number): Promise<string> {
+    this.assertReady();
+
+    const connection = this.connection!;
+    const mintPubkey = new PublicKey(mintAddress);
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const ata = await getOrCreateAssociatedTokenAccount(
+        connection, keypair, mintPubkey, keypair.publicKey,
+      );
+
+      const signature = await mintTo(
+        connection, keypair, mintPubkey, ata.address, keypair, amount,
+      );
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+      this.emit('transaction:confirmed', signature);
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Write a memo on-chain via the Memo Program v2.
+   *
+   * @param memoText - The text to store on-chain (max ~566 bytes).
+   * @returns The transaction signature.
+   */
+  async sendMemo(memoText: string): Promise<string> {
+    this.assertReady();
+
+    const instruction = new TransactionInstruction({
+      keys: [],
+      programId: MEMO_PROGRAM_ID,
+      data: Buffer.from(memoText, 'utf-8'),
+    });
+
+    const transaction = new Transaction().add(instruction);
+    return this.signAndSendTransaction(transaction);
   }
 
   /**
@@ -376,6 +550,14 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       throw new Error('Wallet has not been initialized');
     }
     return this.keystoreId;
+  }
+
+  /** Return the underlying Solana Connection. Throws if not initialized. */
+  getConnection(): Connection {
+    if (!this.connection) {
+      throw new Error('Wallet has not been initialized');
+    }
+    return this.connection;
   }
 
   /**

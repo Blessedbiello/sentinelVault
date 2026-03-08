@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SentinelVault Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      background: #0a0e17;
+      color: #e0e6ed;
+      min-height: 100vh;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #0f1923 0%, #1a2332 100%);
+      border-bottom: 1px solid #1e2d3d;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      color: #00d4aa;
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+
+    .header .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #8899aa;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff4444;
+    }
+
+    .status-dot.connected { background: #00d4aa; }
+
+    .metrics-bar {
+      background: #0f1923;
+      border-bottom: 1px solid #1e2d3d;
+      padding: 12px 24px;
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+    }
+
+    .metric {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .metric-label {
+      font-size: 10px;
+      color: #556677;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .metric-value {
+      font-size: 16px;
+      color: #00d4aa;
+      font-weight: 600;
+    }
+
+    .main {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 0;
+      min-height: calc(100vh - 110px);
+    }
+
+    .agents-panel {
+      padding: 20px 24px;
+      overflow-y: auto;
+    }
+
+    .agents-panel h2 {
+      font-size: 14px;
+      color: #8899aa;
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .agent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    .agent-card {
+      background: #111a27;
+      border: 1px solid #1e2d3d;
+      border-radius: 8px;
+      padding: 16px;
+      transition: border-color 0.2s;
+    }
+
+    .agent-card:hover {
+      border-color: #00d4aa44;
+    }
+
+    .agent-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .agent-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #e0e6ed;
+    }
+
+    .agent-type {
+      font-size: 11px;
+      color: #556677;
+      padding: 2px 8px;
+      background: #1a2332;
+      border-radius: 4px;
+    }
+
+    .status-badge {
+      font-size: 11px;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .status-badge.idle { background: #00d4aa22; color: #00d4aa; }
+    .status-badge.analyzing { background: #00aaff22; color: #00aaff; }
+    .status-badge.executing { background: #aa44ff22; color: #aa44ff; }
+    .status-badge.paused { background: #ffaa0022; color: #ffaa00; }
+    .status-badge.error { background: #ff444422; color: #ff4444; }
+    .status-badge.stopped { background: #33445522; color: #556677; }
+
+    .agent-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+
+    .stat-label { color: #556677; }
+    .stat-value { color: #aabbcc; font-weight: 500; }
+    .stat-value.sol { color: #00d4aa; }
+
+    .agent-wallet {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #1e2d3d;
+      font-size: 11px;
+      color: #445566;
+      word-break: break-all;
+    }
+
+    .activity-panel {
+      background: #0c1219;
+      border-left: 1px solid #1e2d3d;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .activity-panel h2 {
+      font-size: 14px;
+      color: #8899aa;
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .activity-feed {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .activity-item {
+      background: #111a27;
+      border: 1px solid #1a2332;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 12px;
+    }
+
+    .activity-time {
+      color: #445566;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+
+    .activity-event {
+      color: #00aaff;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .activity-detail {
+      color: #8899aa;
+      font-size: 11px;
+    }
+
+    .empty-state {
+      color: #334455;
+      font-style: italic;
+      text-align: center;
+      padding: 40px 20px;
+    }
+
+    @media (max-width: 900px) {
+      .main { grid-template-columns: 1fr; }
+      .activity-panel { border-left: none; border-top: 1px solid #1e2d3d; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>SENTINELVAULT</h1>
+    <div class="status">
+      <div class="status-dot" id="ws-status"></div>
+      <span id="ws-label">Connecting...</span>
+    </div>
+  </div>
+
+  <div class="metrics-bar" id="metrics-bar">
+    <div class="metric">
+      <span class="metric-label">Agents</span>
+      <span class="metric-value" id="m-agents">0 / 0</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Transactions</span>
+      <span class="metric-value" id="m-txns">0</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Volume</span>
+      <span class="metric-value" id="m-volume">0.0000 SOL</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Uptime</span>
+      <span class="metric-value" id="m-uptime">0m 0s</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Memory</span>
+      <span class="metric-value" id="m-memory">0.0 MB</span>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="agents-panel">
+      <h2>Agents</h2>
+      <div class="agent-grid" id="agent-grid">
+        <div class="empty-state">Waiting for agent data...</div>
+      </div>
+    </div>
+
+    <div class="activity-panel">
+      <h2>Live Activity</h2>
+      <div class="activity-feed" id="activity-feed">
+        <div class="empty-state">Waiting for events...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const MAX_ACTIVITY = 50;
+    let activities = [];
+    let agentsData = [];
+    let metricsData = null;
+
+    // ── WebSocket ──────────────────────────────────────────────────────────
+
+    function connect() {
+      const ws = new WebSocket('ws://' + location.hostname + ':3001');
+
+      ws.onopen = () => {
+        document.getElementById('ws-status').classList.add('connected');
+        document.getElementById('ws-label').textContent = 'Connected';
+        addActivity('system', 'WebSocket connected', '');
+      };
+
+      ws.onclose = () => {
+        document.getElementById('ws-status').classList.remove('connected');
+        document.getElementById('ws-label').textContent = 'Disconnected';
+        addActivity('system', 'WebSocket disconnected', 'Reconnecting in 3s...');
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {};
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          handleMessage(msg);
+        } catch (e) {}
+      };
+    }
+
+    function handleMessage(msg) {
+      switch (msg.event) {
+        case 'snapshot':
+          if (msg.data.agents) { agentsData = msg.data.agents; renderAgents(); }
+          if (msg.data.systemMetrics) { metricsData = msg.data.systemMetrics; renderMetrics(); }
+          break;
+        case 'metrics:updated':
+          metricsData = msg.data;
+          renderMetrics();
+          break;
+        case 'agent:created':
+          addActivity('agent:created', `Agent "${msg.data.name}" created`, `Type: ${msg.data.type}`);
+          fetchDashboard();
+          break;
+        case 'agent:started':
+          addActivity('agent:started', `Agent started`, `ID: ${msg.data.agentId.slice(0,8)}...`);
+          fetchDashboard();
+          break;
+        case 'agent:stopped':
+          addActivity('agent:stopped', `Agent stopped`, `ID: ${msg.data.agentId.slice(0,8)}...`);
+          fetchDashboard();
+          break;
+        case 'alert':
+          addActivity('alert:' + msg.data.severity, msg.data.message.slice(0, 100), '');
+          break;
+        default:
+          addActivity(msg.event, JSON.stringify(msg.data).slice(0, 80), '');
+      }
+    }
+
+    // ── REST fallback ──────────────────────────────────────────────────────
+
+    async function fetchDashboard() {
+      try {
+        const res = await fetch('/api/dashboard');
+        const data = await res.json();
+        if (data.agents) { agentsData = data.agents; renderAgents(); }
+        if (data.systemMetrics) { metricsData = data.systemMetrics; renderMetrics(); }
+      } catch (e) {}
+    }
+
+    // ── Rendering ──────────────────────────────────────────────────────────
+
+    function renderMetrics() {
+      if (!metricsData) return;
+      const m = metricsData;
+      document.getElementById('m-agents').textContent = `${m.activeAgents} / ${m.totalAgents}`;
+      document.getElementById('m-txns').textContent = m.totalTransactions;
+      document.getElementById('m-volume').textContent = m.totalVolumeSol.toFixed(4) + ' SOL';
+      const mins = Math.floor(m.uptimeSeconds / 60);
+      const secs = Math.floor(m.uptimeSeconds % 60);
+      document.getElementById('m-uptime').textContent = `${mins}m ${secs}s`;
+      document.getElementById('m-memory').textContent = m.memoryUsageMb.toFixed(1) + ' MB';
+    }
+
+    function renderAgents() {
+      const grid = document.getElementById('agent-grid');
+      if (!agentsData.length) {
+        grid.innerHTML = '<div class="empty-state">No agents registered</div>';
+        return;
+      }
+
+      grid.innerHTML = agentsData.map(agent => {
+        const w = agent.wallet || {};
+        const p = agent.performance || {};
+        const pubkey = w.publicKey || 'N/A';
+        const shortKey = pubkey.length > 20 ? pubkey.slice(0, 8) + '...' + pubkey.slice(-4) : pubkey;
+        const tokenCount = (w.tokenBalances || []).length;
+        const tokenInfo = tokenCount > 0
+          ? (w.tokenBalances || []).map(t => `${t.uiBalance} ${t.symbol}`).join(', ')
+          : 'None';
+
+        const lastDecision = agent.lastDecision;
+        const decisionInfo = lastDecision
+          ? `${lastDecision.action} (${(lastDecision.confidence * 100).toFixed(0)}%)`
+          : 'None';
+
+        return `
+          <div class="agent-card">
+            <div class="agent-header">
+              <div>
+                <div class="agent-name">${agent.name}</div>
+                <span class="agent-type">${agent.type}</span>
+              </div>
+              <span class="status-badge ${agent.status}">${agent.status}</span>
+            </div>
+            <div class="agent-stats">
+              <div class="stat"><span class="stat-label">SOL</span><span class="stat-value sol">${(w.balanceSol || 0).toFixed(4)}</span></div>
+              <div class="stat"><span class="stat-label">Tokens</span><span class="stat-value">${tokenInfo}</span></div>
+              <div class="stat"><span class="stat-label">Decisions</span><span class="stat-value">${decisionInfo}</span></div>
+              <div class="stat"><span class="stat-label">Txns</span><span class="stat-value">${p.totalTransactions || 0}</span></div>
+              <div class="stat"><span class="stat-label">Volume</span><span class="stat-value sol">${(p.totalVolumeSol || 0).toFixed(4)}</span></div>
+              <div class="stat"><span class="stat-label">Win Rate</span><span class="stat-value">${((p.winRate || 0) * 100).toFixed(0)}%</span></div>
+            </div>
+            <div class="agent-wallet">${shortKey}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function addActivity(event, detail, extra) {
+      const now = new Date();
+      const time = now.toLocaleTimeString();
+      activities.unshift({ time, event, detail, extra });
+      if (activities.length > MAX_ACTIVITY) activities.length = MAX_ACTIVITY;
+
+      const feed = document.getElementById('activity-feed');
+      feed.innerHTML = activities.map(a => `
+        <div class="activity-item">
+          <div class="activity-time">${a.time}</div>
+          <div class="activity-event">${a.event}</div>
+          <div class="activity-detail">${a.detail}${a.extra ? ' — ' + a.extra : ''}</div>
+        </div>
+      `).join('');
+    }
+
+    // ── Init ───────────────────────────────────────────────────────────────
+
+    connect();
+    fetchDashboard();
+
+    // Poll for dashboard state every 10s as fallback
+    setInterval(fetchDashboard, 10000);
+  </script>
+</body>
+</html>
