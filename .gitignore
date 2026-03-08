@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.sentinelvault/keystores/
+.sentinelvault/audit/
+.sentinelvault/logs/
+coverage/
+tests/.test-*/
+*.log
+.DS_Store
