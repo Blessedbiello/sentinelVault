@@ -263,6 +263,7 @@ export class PolicyEngine extends EventEmitter<PolicyEngineEvents> {
         'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',    // SPL Token Program
         'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',    // Associated Token Program
         'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',     // Memo Program v2
+        'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',     // Jupiter V6 Aggregator
       ],
       blockedAddresses:        [],
       requireSimulation:       true,

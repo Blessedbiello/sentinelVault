@@ -13,6 +13,9 @@ SentinelVault is an autonomous AI agent wallet framework for Solana. It provides
 - **SPL token operations** -- Create token mints, mint tokens, transfer tokens between agent wallets, and query token balances using `@solana/spl-token`.
 - **Protocol interaction (Memo Program)** -- Write on-chain memos via the Solana Memo Program v2, demonstrating dApp/protocol interaction beyond simple SOL transfers.
 - **Agent-to-agent interaction** -- Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies.
+- **Real price feeds** -- SOL/USD from Jupiter Price API V2 with CoinGecko fallback. Cached for 30s. Graceful fallback to simulated prices when APIs are unreachable.
+- **Jupiter DEX quotes** -- Real Jupiter V6 swap quotes (SOL → USDC) showing route plan, price impact, and output amount. Demonstrates DEX awareness for mainnet readiness.
+- **Optional AI/LLM advisor** -- When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, blends LLM recommendations with quantitative signal (60/40 split). Graceful no-op when unavailable.
 - **Multi-factor AI decisions** -- TradingAgent uses a four-factor scoring system (trend, momentum, volatility, balance) with explainable reasoning chains.
 - **Autonomous agent orchestration** -- Spin up multiple independent AI agents, each with its own wallet, security policy, and trading strategy. An orchestrator manages lifecycle, health checks, and metrics aggregation.
 - **OODA decision loop** -- Every agent runs a continuous Observe-Orient-Decide-Act cycle. Concrete strategies (DCA, momentum, mean reversion, liquidity provision) are pluggable via abstract method overrides.
@@ -118,6 +121,27 @@ policy.maxTransactionsPerMinute = 5;
 const engine = new PolicyEngine('agent-001', policy);
 const result = engine.validateTransaction({ amountSol: 0.3 });
 // result.allowed === true
+```
+
+### Real price feeds and Jupiter quotes
+
+```typescript
+import { PriceFeed, JupiterClient, AIAdvisor } from 'sentinel-vault';
+
+// Fetch real SOL/USD price
+const priceFeed = new PriceFeed();
+const price = await priceFeed.getSOLPrice();
+// Returns: { price: 172.45, source: 'jupiter', timestamp: ... } or null
+
+// Fetch Jupiter DEX swap quote
+const jupiter = new JupiterClient();
+const quote = await jupiter.getQuote({ amount: 10_000_000 }); // 0.01 SOL in lamports
+// Returns: { inputMint, outputMint, inAmount, outAmount, priceImpactPct, routePlan }
+
+// Check AI advisor availability
+const advisor = new AIAdvisor(); // reads ANTHROPIC_API_KEY / OPENAI_API_KEY from env
+console.log(advisor.isAvailable()); // true if API key is configured
+console.log(advisor.getProvider());  // 'anthropic' | 'openai' | null
 ```
 
 ### Listen to events
@@ -243,7 +267,7 @@ Orchestrator defaults (constructor config):
 
 | Type                  | Class             | Status         | Description                                      |
 |-----------------------|-------------------|----------------|--------------------------------------------------|
-| `trader`              | `TradingAgent`    | Implemented    | Autonomous trading with simulated price feeds     |
+| `trader`              | `TradingAgent`    | Implemented    | Autonomous trading with real/simulated prices + AI |
 | `liquidity_provider`  | `LiquidityAgent`  | Implemented    | Simulated LP pool management and rebalancing      |
 | `arbitrageur`         | (TradingAgent)    | Stub           | Falls back to TradingAgent; dedicated impl pending|
 | `portfolio_manager`   | (TradingAgent)    | Stub           | Falls back to TradingAgent; dedicated impl pending|
@@ -267,9 +291,9 @@ Each strategy accepts a `riskLevel` parameter: `conservative`, `moderate`, or `a
 ## Limitations and Constraints
 
 - **Devnet only** -- The framework is designed and tested for Solana devnet. Mainnet usage requires significant policy hardening and has not been validated.
-- **Simulated prices** -- The TradingAgent uses a local random-walk price simulation, not real market data. The LiquidityAgent simulates pool state internally.
+- **Simulated prices (fallback)** -- The TradingAgent uses real Jupiter/CoinGecko prices by default, but falls back to a local random-walk simulation when APIs are unreachable. The LiquidityAgent simulates pool state internally.
 - **0.01 SOL trade cap** -- Each TradingAgent trade is hard-capped at 0.01 SOL (and never more than 10% of wallet balance) to protect devnet funds.
-- **No real DEX integration** -- Trades are SOL transfers to a target address, not actual swaps on a DEX. SPL token operations use real on-chain mint/transfer via `@solana/spl-token`.
+- **No real DEX execution** -- Trades are SOL transfers to a target address, not actual swaps on a DEX (Jupiter quotes are fetched for transparency but execution is devnet SOL transfers). SPL token operations use real on-chain mint/transfer via `@solana/spl-token`.
 - **Arbitrageur and portfolio manager** -- These agent types fall back to TradingAgent; dedicated implementations are not yet available.
 - **Single-process** -- All agents run in a single Node.js process. No distributed coordination or persistence across restarts.
 - **No mainnet safeguards** -- There is no multi-sig, hardware wallet integration, or human-in-the-loop approval workflow.

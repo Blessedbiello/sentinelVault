@@ -37,9 +37,13 @@ src/
   security/
     policy-engine.ts        # 8-layer security validation chain
     audit-logger.ts         # Structured audit log with risk scoring
+  integrations/
+    price-feed.ts           # Real SOL/USD from Jupiter + CoinGecko
+    jupiter.ts              # Jupiter V6 DEX quote/swap client
+    ai-advisor.ts           # Optional LLM trade advisor (Claude/OpenAI)
   agents/
     base-agent.ts           # Abstract OODA loop base class
-    trading-agent.ts        # DCA, momentum, mean reversion strategies
+    trading-agent.ts        # DCA, momentum, mean reversion + real prices + AI
     liquidity-agent.ts      # Simulated LP pool management
     orchestrator.ts         # Multi-agent lifecycle coordinator
   cli/index.ts              # Commander-based CLI

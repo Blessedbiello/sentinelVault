@@ -122,6 +122,31 @@ export interface TransactionOptions {
 // ─── Agent Types ─────────────────────────────────────────────────────────────
 
 export type AgentType = 'trader' | 'liquidity_provider' | 'arbitrageur' | 'portfolio_manager';
+
+// ─── Adaptive Learning Types ────────────────────────────────────────────────
+
+export type MarketRegime = 'trending' | 'mean_reverting' | 'volatile' | 'quiet';
+
+export interface AdaptiveWeights {
+  trend: number;
+  momentum: number;
+  volatility: number;
+  balance: number;
+}
+
+export interface WeightUpdate {
+  timestamp: number;
+  oldWeights: AdaptiveWeights;
+  newWeights: AdaptiveWeights;
+  trigger: string;
+}
+
+export interface ConfidenceCalibration {
+  predictedBucket: string;
+  totalPredictions: number;
+  correctPredictions: number;
+  accuracy: number;
+}
 export type AgentStatus = 'idle' | 'analyzing' | 'executing' | 'paused' | 'error' | 'stopped';
 export type StrategyType = 'dca' | 'momentum' | 'mean_reversion' | 'grid_trading' | 'liquidity_provision';
 
@@ -341,6 +366,26 @@ export interface CreateAgentParams {
   cluster?: SolanaCluster;
   rpcEndpoint?: string;
   securityPolicy?: Partial<SecurityPolicy>;
+}
+
+// ─── Event Types ─────────────────────────────────────────────────────────────
+
+// ─── Integration Types ──────────────────────────────────────────────────────
+
+export interface PriceData {
+  price: number;
+  source: 'jupiter' | 'coingecko' | 'simulated' | 'cache';
+  timestamp: number;
+}
+
+export interface JupiterQuote {
+  inputMint: string;
+  outputMint: string;
+  inAmount: string;
+  outAmount: string;
+  priceImpactPct: string;
+  routePlan: { swapInfo: { label: string } }[];
+  otherAmountThreshold: string;
 }
 
 // ─── Event Types ─────────────────────────────────────────────────────────────

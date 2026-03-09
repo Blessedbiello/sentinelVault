@@ -452,6 +452,22 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   }
 
   /**
+   * Submit a pre-built serialized transaction (e.g. from Jupiter swap API).
+   * Deserializes, signs, and broadcasts via the standard pipeline.
+   *
+   * @param base64Tx - Base64-encoded serialized transaction.
+   * @returns The transaction signature.
+   */
+  async submitSerializedTransaction(base64Tx: string): Promise<string> {
+    this.assertReady();
+
+    const buffer = Buffer.from(base64Tx, 'base64');
+    const transaction = Transaction.from(buffer);
+
+    return this.signAndSendTransaction(transaction);
+  }
+
+  /**
    * Sign a transaction without broadcasting it. Useful for constructing
    * multi-sig or offline flows. Secret key is wiped after signing.
    */

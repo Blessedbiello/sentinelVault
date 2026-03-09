@@ -426,6 +426,32 @@ describe('AgenticWallet — Transaction Operations', () => {
     });
   });
 
+  // ── submitSerializedTransaction ──────────────────────────────────────────
+
+  describe('submitSerializedTransaction', () => {
+    it('deserializes, signs, and sends a base64-encoded transaction', async () => {
+      const wallet = await createInitializedWallet();
+
+      // Build a transaction, serialize it to base64
+      const tx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: testKeypair.publicKey,
+          toPubkey: Keypair.generate().publicKey,
+          lamports: 1000,
+        }),
+      );
+      tx.feePayer = testKeypair.publicKey;
+      tx.recentBlockhash = 'EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N';
+
+      const base64Tx = tx.serialize({ requireAllSignatures: false }).toString('base64');
+
+      const sig = await wallet.submitSerializedTransaction(base64Tx);
+
+      expect(sig).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+  });
+
   // ── signTransaction ──────────────────────────────────────────────────────
 
   describe('signTransaction', () => {

@@ -148,6 +148,28 @@ export class DashboardServer {
       }
     });
 
+    // ── Agent Decisions ─────────────────────────────────────────────────────
+
+    this.app.get('/api/agents/:id/decisions', (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const agent = this.orchestrator.getAgent(req.params.id);
+        if (!agent) {
+          res.status(404).json({ error: `Agent not found: ${req.params.id}` });
+          return;
+        }
+        const decisions = agent.getDecisionHistory().slice(-20);
+        res.json({
+          agentId: req.params.id,
+          adaptiveWeights: agent.getAdaptiveWeights(),
+          marketRegime: agent.getMarketRegime(),
+          confidenceCalibration: agent.getConfidenceCalibration(),
+          decisions,
+        });
+      } catch (err) {
+        next(err);
+      }
+    });
+
     // ── Agent Lifecycle ───────────────────────────────────────────────────────
 
     this.app.post('/api/agents/:id/start', (req: Request, res: Response, next: NextFunction) => {
@@ -463,6 +485,7 @@ if (require.main === module) {
       console.log('    GET  /api/metrics');
       console.log('    GET  /api/dashboard');
       console.log('    GET  /api/agents');
+      console.log('    GET  /api/agents/:id/decisions');
       console.log('    POST /api/agents');
       console.log('    POST /api/agents/:id/start');
       console.log('    POST /api/agents/:id/stop');

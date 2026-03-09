@@ -9,6 +9,9 @@
 import { AgentOrchestrator } from '../src/agents/orchestrator';
 import { TradingAgent } from '../src/agents/trading-agent';
 import { DashboardServer } from '../src/dashboard/server';
+import { PriceFeed } from '../src/integrations/price-feed';
+import { JupiterClient } from '../src/integrations/jupiter';
+import { AIAdvisor } from '../src/integrations/ai-advisor';
 import chalk from 'chalk';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -230,6 +233,45 @@ async function airdropWithRetry(
     info(`Beta  balance: ${betaBalance.toFixed(4)} SOL`);
 
     // ═══════════════════════════════════════════════════════════════════════
+    // STEP 2.5: Real Market Data
+    // ═══════════════════════════════════════════════════════════════════════
+
+    section('Step 2.5 — Real Market Data');
+
+    const priceFeed = new PriceFeed();
+    const jupiterClient = new JupiterClient();
+    const aiAdvisor = new AIAdvisor();
+
+    // Fetch real SOL/USD price
+    const priceData = await priceFeed.getSOLPrice();
+    if (priceData) {
+      ok(`SOL/USD price: $${priceData.price.toFixed(2)} (source: ${priceData.source})`);
+    } else {
+      warn('Real price unavailable — agents will use simulated prices');
+    }
+
+    // Fetch Jupiter swap quote
+    try {
+      const quote = await jupiterClient.getQuote({ amount: 10_000_000 }); // 0.01 SOL
+      if (quote) {
+        const outUSDC = (parseFloat(quote.outAmount) / 1e6).toFixed(2);
+        const route = quote.routePlan.map(r => r.swapInfo.label).join(' → ') || 'direct';
+        ok(`Jupiter quote: 0.01 SOL → ${outUSDC} USDC (via ${route}, ${quote.priceImpactPct}% impact)`);
+      } else {
+        warn('Jupiter quote unavailable');
+      }
+    } catch (e: any) {
+      warn(`Jupiter quote failed: ${(e.message ?? String(e)).slice(0, 60)}`);
+    }
+
+    // Check AI advisor availability
+    if (aiAdvisor.isAvailable()) {
+      ok(`AI advisor: available (provider: ${aiAdvisor.getProvider()})`);
+    } else {
+      info('AI advisor: not available (set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable)');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // STEP 3: SOL Transfer (Agent-to-Agent)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -426,6 +468,48 @@ async function airdropWithRetry(
         );
       }
 
+      // Show adaptive weights and regime
+      if (alphaAgent) {
+        const aw = (alphaAgent as TradingAgent).getAdaptiveWeights();
+        const regime = (alphaAgent as TradingAgent).getMarketRegime();
+        const calibration = (alphaAgent as TradingAgent).getConfidenceCalibration();
+
+        const trendArrow = aw.trend > 0.4 ? '(+)' : aw.trend < 0.4 ? '(-)' : '';
+        const momArrow = aw.momentum > 0.3 ? '(+)' : aw.momentum < 0.3 ? '(-)' : '';
+        const volArrow = aw.volatility > 0.2 ? '(+)' : aw.volatility < 0.2 ? '(-)' : '';
+        const balArrow = aw.balance > 0.1 ? '(+)' : aw.balance < 0.1 ? '(-)' : '';
+
+        console.log('');
+        console.log(
+          chalk.white('  Weights: ') +
+          chalk.cyan(`trend=${aw.trend.toFixed(2)}${trendArrow}`) + ' ' +
+          chalk.blue(`momentum=${aw.momentum.toFixed(2)}${momArrow}`) + ' ' +
+          chalk.yellow(`vol=${aw.volatility.toFixed(2)}${volArrow}`) + ' ' +
+          chalk.magenta(`bal=${aw.balance.toFixed(2)}${balArrow}`)
+        );
+
+        const regimeColor =
+          regime === 'trending' ? chalk.green :
+          regime === 'mean_reverting' ? chalk.blue :
+          regime === 'volatile' ? chalk.yellow :
+          chalk.gray;
+
+        let calibStr = '';
+        if (calibration.length > 0) {
+          const totalCorrect = calibration.reduce((s, c) => s + c.correctPredictions, 0);
+          const totalPredictions = calibration.reduce((s, c) => s + c.totalPredictions, 0);
+          if (totalPredictions > 0) {
+            const pct = Math.round((totalCorrect / totalPredictions) * 100);
+            calibStr = ` | Calibration: ${pct}% accuracy (${totalCorrect}/${totalPredictions} correct)`;
+          }
+        }
+
+        console.log(
+          chalk.white('  Regime: ') + regimeColor(regime) +
+          chalk.gray(calibStr)
+        );
+      }
+
       // Print latest reasoning chain if available
       const latestDecision = alphaAgent?.getDecisionHistory().slice(-1)[0];
       const chain = latestDecision?.marketConditions?.reasoningChain as string[] | undefined;
@@ -433,8 +517,29 @@ async function airdropWithRetry(
         console.log('');
         console.log(chalk.gray('  Latest Alpha reasoning:'));
         for (const line of chain) {
-          console.log(chalk.gray(`    ${line}`));
+          // Color-code different sections
+          const coloredLine = line.startsWith('[Price]') ? chalk.cyan(line) :
+            line.startsWith('[Regime]') ? chalk.green(line) :
+            line.startsWith('[Weights]') ? chalk.magenta(line) :
+            line.startsWith('[Jupiter]') ? chalk.magenta(line) :
+            line.startsWith('[AI Advisor]') ? chalk.yellow(line) :
+            line.startsWith('[Blended]') ? chalk.yellow(line) :
+            line.startsWith('[Decision]') ? chalk.green(line) :
+            chalk.gray(line);
+          console.log(`    ${coloredLine}`);
         }
+      }
+
+      // Show price source and Jupiter/AI status
+      const priceSource = latestDecision?.marketConditions?.priceSource as string | undefined;
+      const jupiterQuote = latestDecision?.marketConditions?.jupiterQuote as Record<string, unknown> | undefined;
+      const aiRec = latestDecision?.marketConditions?.aiRecommendation as Record<string, unknown> | undefined;
+      if (priceSource || jupiterQuote || aiRec) {
+        const parts: string[] = [];
+        if (priceSource) parts.push(`Price: ${priceSource}`);
+        if (jupiterQuote) parts.push('Jupiter: ✓');
+        if (aiRec) parts.push(`AI: ${(aiRec.action as string).toUpperCase()}`);
+        console.log(chalk.gray(`    [Integrations] ${parts.join(' | ')}`));
       }
 
       // System metrics
@@ -565,6 +670,13 @@ async function airdropWithRetry(
     console.log(chalk.green('    [✓] Hold SOL and SPL tokens'));
     console.log(chalk.green('    [✓] Interact with test dApp/protocol (Memo + SPL)'));
     console.log(chalk.green('    [✓] Multiple agents operating independently'));
+    console.log(chalk.green('    [✓] Real price feeds (Jupiter/CoinGecko)'));
+    console.log(chalk.green('    [✓] Jupiter DEX swap quotes'));
+    console.log(chalk.green('    [✓] Optional AI/LLM advisor (Claude/OpenAI)'));
+    console.log(chalk.green('    [✓] Adaptive weight learning (hill-climb)'));
+    console.log(chalk.green('    [✓] Market regime detection'));
+    console.log(chalk.green('    [✓] Confidence calibration tracking'));
+    console.log(chalk.green('    [✓] Swap intent memos on-chain'));
     console.log(chalk.green('    [✓] Deep dive document'));
     console.log(chalk.green('    [✓] README + setup instructions'));
     console.log(chalk.green('    [✓] Working devnet prototype'));

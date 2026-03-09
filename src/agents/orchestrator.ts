@@ -91,7 +91,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   // ── Recent Transaction Signatures (newest last) ───────────────────────────
 
-  private readonly recentTxSignatures: { agentId: string; signature: string; timestamp: number }[] = [];
+  private readonly recentTxSignatures: { agentId: string; signature: string; timestamp: number; slot: number; fee: number }[] = [];
 
   // ── Uptime ─────────────────────────────────────────────────────────────────
 
@@ -407,6 +407,9 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     };
 
     this.alerts.push(alert);
+    if (this.alerts.length > 1000) {
+      this.alerts.splice(0, this.alerts.length - 1000);
+    }
     this.emit('alert', alert);
 
     this.auditLogger.logSystemEvent('alert:created', {
@@ -430,7 +433,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
       recentTransactions: this.recentTxSignatures.slice(-20).reverse().map((tx) => ({
         id: tx.signature,
         request: { id: tx.signature, agentId: tx.agentId, walletId: tx.agentId, type: 'transfer_sol' as const, priority: 'medium' as const, maxRetries: 0, simulateFirst: false, metadata: {}, createdAt: tx.timestamp },
-        result: { id: tx.signature, signature: tx.signature, status: 'confirmed' as const, slot: 0, blockTime: null, fee: 0, error: null, logs: [], duration: 0 },
+        result: { id: tx.signature, signature: tx.signature, status: 'confirmed' as const, slot: tx.slot, blockTime: null, fee: tx.fee, error: null, logs: [], duration: 0 },
         attempts: 1,
         createdAt: tx.timestamp,
         completedAt: tx.timestamp,
@@ -482,9 +485,17 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     };
   }
 
-  /** Return the current state snapshot for every registered agent. */
+  /** Return the current state snapshot for every registered agent, enriched with adaptive data. */
   getAgentStates(): AgentState[] {
-    return Array.from(this.agents.values()).map(({ agent }) => agent.getState());
+    return Array.from(this.agents.values()).map(({ agent }) => {
+      const state = agent.getState();
+      // Enrich with adaptive learning data for dashboard consumption
+      (state as any).adaptiveWeights = agent.getAdaptiveWeights();
+      (state as any).marketRegime = agent.getMarketRegime();
+      (state as any).confidenceCalibration = agent.getConfidenceCalibration();
+      (state as any).recentDecisions = agent.getDecisionHistory().slice(-5);
+      return state;
+    });
   }
 
   /**
@@ -644,11 +655,26 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     });
 
     wallet.on('transaction:confirmed', (signature) => {
-      this.recentTxSignatures.push({ agentId, signature, timestamp: Date.now() });
+      const entry = { agentId, signature, timestamp: Date.now(), slot: 0, fee: 0 };
+      this.recentTxSignatures.push(entry);
       // Keep only the most recent 50 entries
       if (this.recentTxSignatures.length > 50) {
         this.recentTxSignatures.shift();
       }
+
+      // Asynchronously enrich with on-chain data (best-effort)
+      void (async () => {
+        try {
+          const conn = wallet.getConnection();
+          const tx = await conn.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+          if (tx) {
+            entry.slot = tx.slot;
+            entry.fee = tx.meta?.fee ?? 0;
+          }
+        } catch {
+          // Non-critical — dashboard will show slot=0, fee=0
+        }
+      })();
     });
 
     wallet.on('transaction:failed', (error) => {

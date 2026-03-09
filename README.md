@@ -73,8 +73,8 @@ At its core, SentinelVault bridges the gap between autonomous AI decision-making
 │   Circuit Breaker  |  Recipient Whitelist            │
 ├──────────────────────────────────────────────────────┤
 │                Core Wallet Layer                      │
-│   Keystore Manager  |  AgenticWallet  |  Tx Engine   │
-│   Priority Queue  |  Retry Logic  |  Fee Estimation  │
+│   Keystore Manager  |  AgenticWallet  |  Retry Logic  │
+│   Price Feed  |  Jupiter Quotes  |  AI Advisor       │
 ├──────────────────────────────────────────────────────┤
 │                  Solana Network                       │
 │            devnet  |  testnet  |  mainnet-beta        │
@@ -87,8 +87,20 @@ At its core, SentinelVault bridges the gap between autonomous AI decision-making
 - **Agent Orchestrator** -- Coordinates multiple agents, manages lifecycle events, handles resource allocation, and provides inter-agent messaging.
 - **OODA Decision Loop** -- The cognitive core of each agent: observe market data, orient against strategy parameters, decide on actions, and act through the transaction engine.
 - **Security Layer** -- Enforces policies on every transaction, logs all activity for audit purposes, and applies rate limits and circuit breakers.
-- **Core Wallet Layer** -- Manages encrypted keystores, constructs and signs transactions, handles priority queuing and retry logic.
+- **Core Wallet Layer** -- Manages encrypted keystores, constructs and signs transactions, handles retry logic, and integrates real price feeds (Jupiter/CoinGecko), Jupiter DEX quotes, and optional AI advisor.
 - **Solana Network** -- The underlying blockchain where all transactions are submitted and confirmed.
+
+---
+
+## Judge Quick Start
+
+Three commands to see everything working:
+
+```bash
+npm install           # Install dependencies
+npm test              # Run full test suite (170+ tests)
+npm run demo:showcase # Live demo on Solana devnet (all features)
+```
 
 ---
 
@@ -237,9 +249,17 @@ The TradingAgent uses a multi-factor scoring system with four independent factor
 
 Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies where agents trade with each other independently.
 
-### Transaction Engine with Priority Queue
+### Real Price Feeds (Jupiter + CoinGecko)
 
-Transactions are queued with configurable priority levels, include automatic retry logic with exponential backoff, and support dynamic fee estimation based on current network conditions.
+The TradingAgent fetches real SOL/USD prices from Jupiter Price API V2, with CoinGecko as a fallback. Prices are cached for 30 seconds to avoid rate limits. When both APIs are unreachable, the agent gracefully falls back to its simulated price feed — ensuring the demo always works regardless of network conditions.
+
+### Jupiter DEX Swap Quotes
+
+On each OODA cycle, the agent fetches a real Jupiter V6 swap quote (SOL → USDC) to demonstrate awareness of DEX routing, price impact, and available liquidity. The quote is included in the agent's reasoning chain for full transparency. On devnet, actual execution remains as SOL transfers since Jupiter AMM pools are mainnet-only.
+
+### Optional AI/LLM Advisor
+
+When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, the TradingAgent blends LLM recommendations with its quantitative signal (60% quantitative, 40% AI). The AI advisor receives market context (price, history, strategy, quantitative signal) and returns a structured recommendation. When no API key is configured, the agent operates on pure quantitative scoring with zero degradation.
 
 ### Real-Time Dashboard
 
@@ -434,25 +454,22 @@ The dashboard exposes a REST API for programmatic access.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/wallets` | List all wallets |
-| `GET` | `/wallets/:id` | Get wallet details and balance |
-| `POST` | `/wallets` | Create a new wallet |
+| `GET` | `/health` | System health and uptime |
+| `GET` | `/metrics` | System-wide performance metrics |
+| `GET` | `/dashboard` | Full dashboard state snapshot |
 | `GET` | `/agents` | List all agents with status |
-| `GET` | `/agents/:name` | Get agent details |
-| `POST` | `/agents/:name/start` | Start a specific agent |
-| `POST` | `/agents/:name/stop` | Stop a specific agent |
-| `POST` | `/agents/:name/pause` | Pause a specific agent |
-| `POST` | `/agents/:name/resume` | Resume a paused agent |
-| `GET` | `/transactions` | List recent transactions |
-| `GET` | `/transactions/:id` | Get transaction details |
-| `GET` | `/policies` | Get current policy configuration |
-| `PUT` | `/policies` | Update policy configuration |
+| `GET` | `/agents/:id/decisions` | Last 20 decisions with adaptive weights, regime, calibration |
+| `POST` | `/agents` | Create a new agent |
+| `POST` | `/agents/:id/start` | Start a specific agent |
+| `POST` | `/agents/:id/stop` | Stop a specific agent |
+| `POST` | `/agents/:id/pause` | Pause a specific agent |
+| `POST` | `/agents/:id/resume` | Resume a paused agent |
+| `DELETE` | `/agents/:id` | Remove an agent |
 | `GET` | `/audit` | Query audit log entries |
-| `GET` | `/audit/export` | Export audit log |
-| `GET` | `/status` | System health and status |
-| `GET` | `/metrics` | Performance metrics |
+| `GET` | `/risk` | Risk summary from audit log |
+| `GET` | `/alerts` | List all alerts |
 
-**WebSocket:** Connect to `ws://localhost:3000/ws` for real-time event streaming (agent actions, transactions, security alerts).
+**WebSocket:** Connect to `ws://localhost:3001` for real-time event streaming (agent actions, transactions, security alerts).
 
 ---
 
@@ -539,9 +556,13 @@ sentinelVault/
 │   ├── security/            # Policy engine and audit logging
 │   │   ├── policy-engine.ts #   8-layer security validation chain
 │   │   └── audit-logger.ts  #   Structured audit log with risk scoring
+│   ├── integrations/        # External protocol integrations
+│   │   ├── price-feed.ts    #   Real SOL/USD from Jupiter + CoinGecko
+│   │   ├── jupiter.ts       #   Jupiter V6 DEX quote/swap client
+│   │   └── ai-advisor.ts    #   Optional LLM trade advisor (Claude/OpenAI)
 │   ├── agents/              # Agent implementations and orchestrator
 │   │   ├── base-agent.ts    #   Abstract OODA loop base class
-│   │   ├── trading-agent.ts #   Multi-factor quantitative trading agent
+│   │   ├── trading-agent.ts #   Multi-factor trading + real prices + AI
 │   │   ├── liquidity-agent.ts # Simulated LP pool management
 │   │   └── orchestrator.ts  #   Multi-agent lifecycle coordinator
 │   ├── cli/index.ts         # Commander-based CLI
@@ -585,11 +606,7 @@ npx jest --testPathPattern="security"
 
 ### Test Coverage
 
-| Module | Statements | Branches | Functions |
-|---|---|---|---|
-| Core (keystore, wallet) | 88% | 63% | 88% |
-| Security (policy engine, audit) | 91% | 72% | 93% |
-| Agents (base, trading, liquidity) | 82% | 67% | 72% |
+Run `npm run test:coverage` to see current coverage. The test suite includes 170+ tests across 12 suites covering core wallet operations, security policy engine, audit logging, all agent types, adaptive learning, and the integration layer (price feeds, Jupiter, AI advisor).
 
 ---
 

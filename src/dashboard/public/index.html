@@ -176,6 +176,107 @@
       word-break: break-all;
     }
 
+    .regime-badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-left: 6px;
+    }
+    .regime-badge.trending { background: #00d4aa22; color: #00d4aa; }
+    .regime-badge.mean_reverting { background: #00aaff22; color: #00aaff; }
+    .regime-badge.volatile { background: #ffaa0022; color: #ffaa00; }
+    .regime-badge.quiet { background: #33445522; color: #778899; }
+
+    .weight-bars {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .weight-bar-row {
+      display: flex;
+      align-items: center;
+      font-size: 10px;
+      gap: 6px;
+    }
+
+    .weight-bar-label {
+      color: #556677;
+      width: 42px;
+      text-align: right;
+    }
+
+    .weight-bar-track {
+      flex: 1;
+      height: 6px;
+      background: #1a2332;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .weight-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+
+    .weight-bar-fill.trend { background: #00d4aa; }
+    .weight-bar-fill.momentum { background: #00aaff; }
+    .weight-bar-fill.volatility { background: #ffaa00; }
+    .weight-bar-fill.balance { background: #aa44ff; }
+
+    .weight-bar-pct {
+      color: #8899aa;
+      width: 32px;
+      font-size: 10px;
+    }
+
+    .reasoning-section {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #1e2d3d;
+    }
+
+    .reasoning-toggle {
+      font-size: 11px;
+      color: #00aaff;
+      cursor: pointer;
+      border: none;
+      background: none;
+      padding: 0;
+      font-family: inherit;
+    }
+
+    .reasoning-chain {
+      margin-top: 4px;
+      font-size: 10px;
+      color: #8899aa;
+      line-height: 1.5;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+
+    .integration-row {
+      margin-top: 6px;
+      display: flex;
+      gap: 8px;
+      font-size: 10px;
+      flex-wrap: wrap;
+    }
+
+    .integration-pill {
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: #1a2332;
+      color: #8899aa;
+    }
+
+    .integration-pill.active { color: #00d4aa; background: #00d4aa15; }
+
     .activity-panel {
       background: #0c1219;
       border-left: 1px solid #1e2d3d;
@@ -383,7 +484,7 @@
         return;
       }
 
-      grid.innerHTML = agentsData.map(agent => {
+      grid.innerHTML = agentsData.map((agent, idx) => {
         const w = agent.wallet || {};
         const p = agent.performance || {};
         const pubkey = w.publicKey || 'N/A';
@@ -398,11 +499,32 @@
           ? `${lastDecision.action} (${(lastDecision.confidence * 100).toFixed(0)}%)`
           : 'None';
 
+        // Adaptive learning data
+        const aw = agent.adaptiveWeights || { trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 };
+        const regime = agent.marketRegime || 'quiet';
+
+        // Reasoning chain from last decision
+        const chain = lastDecision && lastDecision.marketConditions
+          ? (lastDecision.marketConditions.reasoningChain || [])
+          : [];
+
+        // Integration status
+        const priceSource = lastDecision && lastDecision.marketConditions
+          ? lastDecision.marketConditions.priceSource : null;
+        const hasJupiter = lastDecision && lastDecision.marketConditions
+          ? !!lastDecision.marketConditions.jupiterQuote : false;
+        const hasAI = lastDecision && lastDecision.marketConditions
+          ? !!lastDecision.marketConditions.aiRecommendation : false;
+
+        const cardId = 'reasoning-' + idx;
+
         return `
           <div class="agent-card">
             <div class="agent-header">
               <div>
-                <div class="agent-name">${agent.name}</div>
+                <div class="agent-name">${agent.name}
+                  <span class="regime-badge ${regime}">${regime}</span>
+                </div>
                 <span class="agent-type">${agent.type}</span>
               </div>
               <span class="status-badge ${agent.status}">${agent.status}</span>
@@ -415,6 +537,39 @@
               <div class="stat"><span class="stat-label">Volume</span><span class="stat-value sol">${(p.totalVolumeSol || 0).toFixed(4)}</span></div>
               <div class="stat"><span class="stat-label">Win Rate</span><span class="stat-value">${((p.winRate || 0) * 100).toFixed(0)}%</span></div>
             </div>
+            <div class="weight-bars">
+              <div class="weight-bar-row">
+                <span class="weight-bar-label">trend</span>
+                <div class="weight-bar-track"><div class="weight-bar-fill trend" style="width:${(aw.trend*100).toFixed(0)}%"></div></div>
+                <span class="weight-bar-pct">${(aw.trend*100).toFixed(0)}%</span>
+              </div>
+              <div class="weight-bar-row">
+                <span class="weight-bar-label">mom</span>
+                <div class="weight-bar-track"><div class="weight-bar-fill momentum" style="width:${(aw.momentum*100).toFixed(0)}%"></div></div>
+                <span class="weight-bar-pct">${(aw.momentum*100).toFixed(0)}%</span>
+              </div>
+              <div class="weight-bar-row">
+                <span class="weight-bar-label">vol</span>
+                <div class="weight-bar-track"><div class="weight-bar-fill volatility" style="width:${(aw.volatility*100).toFixed(0)}%"></div></div>
+                <span class="weight-bar-pct">${(aw.volatility*100).toFixed(0)}%</span>
+              </div>
+              <div class="weight-bar-row">
+                <span class="weight-bar-label">bal</span>
+                <div class="weight-bar-track"><div class="weight-bar-fill balance" style="width:${(aw.balance*100).toFixed(0)}%"></div></div>
+                <span class="weight-bar-pct">${(aw.balance*100).toFixed(0)}%</span>
+              </div>
+            </div>
+            <div class="integration-row">
+              <span class="integration-pill ${priceSource && priceSource !== 'simulated' ? 'active' : ''}">${priceSource || 'no price'}</span>
+              <span class="integration-pill ${hasJupiter ? 'active' : ''}">Jupiter ${hasJupiter ? '\\u2713' : '\\u2717'}</span>
+              <span class="integration-pill ${hasAI ? 'active' : ''}">AI ${hasAI ? '\\u2713' : '\\u2717'}</span>
+            </div>
+            ${chain.length > 0 ? `
+              <div class="reasoning-section">
+                <button class="reasoning-toggle" onclick="document.getElementById('${cardId}').style.display = document.getElementById('${cardId}').style.display === 'none' ? 'block' : 'none'">Reasoning Chain</button>
+                <div class="reasoning-chain" id="${cardId}" style="display:none">${chain.map(l => l.replace(/</g, '&lt;')).join('<br>')}</div>
+              </div>
+            ` : ''}
             <div class="agent-wallet">${shortKey}</div>
           </div>
         `;

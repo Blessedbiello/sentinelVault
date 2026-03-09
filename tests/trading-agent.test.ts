@@ -25,6 +25,10 @@ jest.mock('../src/core/keystore', () => ({
   })),
 }));
 
+// ── Mock global.fetch (ensure integration clients fall back gracefully) ─────
+
+(global as any).fetch = jest.fn().mockRejectedValue(new Error('No network in tests'));
+
 // ── Mock @solana/web3.js Connection ──────────────────────────────────────────
 
 const mockGetBalance = jest.fn().mockResolvedValue(2 * LAMPORTS_PER_SOL);
@@ -252,18 +256,19 @@ describe('TradingAgent', () => {
       }
     });
 
-    it('compositeConfidence equals the weighted sum of the four factor scores', async () => {
+    it('compositeConfidence equals the weighted sum using adaptive weights', async () => {
       const { agent } = await buildAgent('dca');
+      const aw = agent.getAdaptiveWeights();
 
       const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
       const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
 
       const mc = decision.marketConditions;
       const expected =
-        0.4 * (mc.trendScore as number) +
-        0.3 * (mc.momentumScore as number) +
-        0.2 * (mc.volatilityScore as number) +
-        0.1 * (mc.balanceScore as number);
+        aw.trend * (mc.trendScore as number) +
+        aw.momentum * (mc.momentumScore as number) +
+        aw.volatility * (mc.volatilityScore as number) +
+        aw.balance * (mc.balanceScore as number);
 
       expect(mc.compositeConfidence as number).toBeCloseTo(expected, 10);
     });
@@ -272,7 +277,7 @@ describe('TradingAgent', () => {
   // ── Reasoning Chain ────────────────────────────────────────────────────────
 
   describe('Reasoning chain', () => {
-    it('reasoningChain has exactly 6 entries (5 factor lines + 1 decision line)', async () => {
+    it('reasoningChain has at least 9 entries including [Regime] and [Weights]', async () => {
       const { agent } = await buildAgent('dca');
 
       const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
@@ -280,14 +285,59 @@ describe('TradingAgent', () => {
 
       const chain = decision.marketConditions.reasoningChain as string[];
       expect(Array.isArray(chain)).toBe(true);
-      expect(chain).toHaveLength(6);
-      // Verify structural prefixes of each entry.
-      expect(chain[0]).toMatch(/^\[Trend\]/);
-      expect(chain[1]).toMatch(/^\[Momentum\]/);
-      expect(chain[2]).toMatch(/^\[Volatility\]/);
-      expect(chain[3]).toMatch(/^\[Balance\]/);
-      expect(chain[4]).toMatch(/^\[Composite\]/);
-      expect(chain[5]).toMatch(/^\[Decision\]/);
+      expect(chain.length).toBeGreaterThanOrEqual(9);
+      // Verify structural prefixes including new adaptive entries.
+      expect(chain[0]).toMatch(/^\[Price\]/);
+      expect(chain[1]).toMatch(/^\[Regime\]/);
+      expect(chain[2]).toMatch(/^\[Trend\]/);
+      expect(chain[3]).toMatch(/^\[Momentum\]/);
+      expect(chain[4]).toMatch(/^\[Volatility\]/);
+      expect(chain[5]).toMatch(/^\[Balance\]/);
+      expect(chain[6]).toMatch(/^\[Weights\]/);
+      expect(chain[7]).toMatch(/^\[Composite\]/);
+      expect(chain[8]).toMatch(/^\[Decision\]/);
+    });
+  });
+
+  // ── Adaptive Weights ────────────────────────────────────────────────────
+
+  describe('Adaptive weights', () => {
+    it('analyze uses adaptiveWeights instead of hard-coded values', async () => {
+      const { agent } = await buildAgent('dca');
+
+      // Modify adaptive weights to verify they're actually used
+      const agentAny = agent as any;
+      agentAny.adaptiveWeights = { trend: 0.7, momentum: 0.1, volatility: 0.1, balance: 0.1 };
+
+      const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
+
+      const mc = decision.marketConditions;
+      // With trend weight=0.7 instead of 0.4, composite should differ
+      const expected =
+        0.7 * (mc.trendScore as number) +
+        0.1 * (mc.momentumScore as number) +
+        0.1 * (mc.volatilityScore as number) +
+        0.1 * (mc.balanceScore as number);
+
+      expect(mc.compositeConfidence as number).toBeCloseTo(expected, 5);
+    });
+
+    it('evaluate calls updateWeights on confirmed trade', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent } = await buildAgent('dca');
+
+      // Seed price history with at least 2 entries
+      const agentAny = agent as any;
+      agentAny.priceHistory = [1.0, 1.05];
+
+      const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
+      const action = await (agent as unknown as { execute(d: AgentDecision): Promise<unknown> }).execute(decision);
+      await (agent as unknown as { evaluate(a: unknown, d: AgentDecision): Promise<void> }).evaluate(action, decision);
+
+      // Weight history should have been updated
+      expect(agent.getWeightHistory().length).toBeGreaterThanOrEqual(1);
     });
   });
 

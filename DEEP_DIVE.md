@@ -171,9 +171,45 @@ Each decision includes a `reasoningChain` — an array of strings documenting ev
 
 The `LiquidityAgent` demonstrates a different class of agent entirely: it manages a simulated LP pool, making rebalance, add-liquidity, and remove-liquidity decisions based on pool imbalance, APY, and utilization thresholds.
 
-### Simulated Price Feeds
+### Real Price Feeds and Jupiter Integration
 
-For devnet operation, the `TradingAgent` generates prices via a random walk with mean reversion:
+The `TradingAgent` integrates with two real price APIs and a DEX quote service:
+
+**Price Feed (PriceFeed class):**
+1. **Jupiter Price API V2** — Primary source. Fetches SOL/USD from `https://api.jup.ag/price/v2`. Response is cached for 30 seconds to avoid rate limiting.
+2. **CoinGecko API** — Fallback when Jupiter is unavailable. Uses the free `/simple/price` endpoint.
+3. **Simulated price** — Final fallback. A random walk with mean reversion generates realistic-looking price series when both APIs are unreachable.
+
+This three-tier fallback ensures the agent always has a price to work with, regardless of network conditions. The price source is recorded in the reasoning chain for transparency.
+
+**Jupiter DEX Quotes (JupiterClient class):**
+
+On each OODA cycle, the agent fetches a real Jupiter V6 swap quote for 0.01 SOL → USDC. The quote reveals:
+- **Route plan** — Which AMM pools (Raydium, Orca, etc.) Jupiter would route through
+- **Price impact** — How much the swap would move the market
+- **Output amount** — The real USDC equivalent at current market prices
+
+This demonstrates that the agent is aware of real DEX infrastructure and could execute swaps on mainnet. On devnet, actual execution remains as SOL transfers since Jupiter AMM pools are mainnet-only — this is documented explicitly in the reasoning chain.
+
+### AI Advisor Integration
+
+When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is configured, the `AIAdvisor` class sends market context to an LLM and blends the recommendation with the quantitative signal:
+
+```
+Blended Confidence = 0.6 × quantitativeConfidence + 0.4 × aiConfidence
+```
+
+The AI receives: current SOL price, price history, wallet balance, strategy type, and the quantitative signal. It returns a structured JSON recommendation (action, confidence, reasoning) that is included in the agent's reasoning chain.
+
+Design principles:
+- **Graceful degradation** — When no API key is set, `aiAdvisor.getTradeRecommendation()` returns `null` and the agent uses pure quantitative scoring. There is zero impact on functionality.
+- **Cost efficiency** — Uses Claude Haiku (cheapest/fastest model) with a 300-token limit.
+- **Timeout protection** — 8-second timeout prevents slow API responses from blocking the OODA cycle.
+- **Error isolation** — All API errors are caught and logged; they never propagate to the agent's error state.
+
+### Simulated Price Feeds (Fallback)
+
+When real APIs are unavailable, the `TradingAgent` generates prices via a random walk with mean reversion:
 
 ```
 drift    = (basePrice - currentPrice) * 0.1
@@ -181,7 +217,7 @@ noise    = (Math.random() - 0.5) * 0.04
 newPrice = clamp(currentPrice + drift + noise, basePrice * 0.5, basePrice * 1.5)
 ```
 
-This produces realistic-looking price series that oscillate around a base value, generating enough signal variation to exercise all three strategies without requiring external oracle infrastructure on devnet.
+This produces realistic-looking price series that oscillate around a base value, generating enough signal variation to exercise all three strategies.
 
 ---
 
@@ -358,6 +394,6 @@ SentinelVault demonstrates that autonomous AI agents can safely manage blockchai
 
 This is not a theoretical design. The devnet prototype creates real wallets, requests real airdrops, submits real transactions, and produces real Solana Explorer-verifiable signatures. Every architectural decision documented here is implemented in working TypeScript, backed by a test suite covering the keystore, wallet, policy engine, audit logger, and orchestrator.
 
-The path from devnet prototype to mainnet deployment requires integrating real DEX protocols (Jupiter, Raydis), hardening the KDF to Argon2id, adding multi-sig support for high-value operations, and implementing ML-based anomaly detection on the audit stream. The framework is explicitly designed so that each of these additions touches exactly one layer while the rest remains stable.
+The framework already integrates with Jupiter for real price feeds and DEX swap quotes, and supports optional LLM-powered trade recommendations via the AI Advisor. The path from devnet prototype to mainnet deployment requires executing Jupiter swaps against real liquidity pools, hardening the KDF to Argon2id, adding multi-sig support for high-value operations, and implementing ML-based anomaly detection on the audit stream. The framework is explicitly designed so that each of these additions touches exactly one layer while the rest remains stable.
 
 SentinelVault is a security-first, production-quality foundation for the next generation of autonomous DeFi agents on Solana.

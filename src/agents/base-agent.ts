@@ -11,6 +11,10 @@ import {
   AgentAction,
   AgentPerformance,
   TransactionValidationParams,
+  AdaptiveWeights,
+  WeightUpdate,
+  MarketRegime,
+  ConfidenceCalibration,
 } from '../types';
 import { AgenticWallet } from '../core/wallet';
 import { PolicyEngine } from '../security/policy-engine';
@@ -29,6 +33,10 @@ interface AgentEvents {
 
 const CONFIDENCE_THRESHOLD = 0.5;
 const AUTO_RECOVERY_DELAY_MS = 5_000;
+const MAX_DECISION_HISTORY = 500;
+const MAX_WEIGHT_HISTORY = 100;
+const DEFAULT_WEIGHTS: AdaptiveWeights = { trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 };
+const WEIGHT_NUDGE = 0.02;
 
 // ─── BaseAgent ────────────────────────────────────────────────────────────────
 
@@ -45,6 +53,12 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   protected readonly config: AgentConfig;
   protected readonly wallet: AgenticWallet;
   protected performance: AgentPerformance;
+
+  // Adaptive learning state
+  protected adaptiveWeights: AdaptiveWeights;
+  protected weightHistory: WeightUpdate[];
+  protected currentRegime: MarketRegime;
+  private confidenceBuckets: Map<string, { total: number; correct: number }>;
 
   private policyEngine: PolicyEngine | null = null;
   private status: AgentStatus;
@@ -63,6 +77,12 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
     this.startedAt = 0;
     this.uptime = 0;
     this.decisionHistory = [];
+
+    // Adaptive learning initialization
+    this.adaptiveWeights = { ...DEFAULT_WEIGHTS };
+    this.weightHistory = [];
+    this.currentRegime = 'quiet';
+    this.confidenceBuckets = new Map();
 
     this.performance = {
       totalTransactions: 0,
@@ -171,6 +191,9 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
 
       // ── Record & emit ─────────────────────────────────────────────────────────
       this.decisionHistory.push(decision);
+      if (this.decisionHistory.length > MAX_DECISION_HISTORY) {
+        this.decisionHistory.splice(0, this.decisionHistory.length - MAX_DECISION_HISTORY);
+      }
       this.emit('agent:decision', decision);
 
       if (action !== null) {
@@ -310,6 +333,132 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   /** Return a shallow copy of the full decision history. */
   getDecisionHistory(): AgentDecision[] {
     return [...this.decisionHistory];
+  }
+
+  // ── Adaptive Learning Methods ──────────────────────────────────────────────
+
+  /**
+   * Detect the current market regime from price history using volatility ratio
+   * and trend strength.
+   */
+  protected detectRegime(priceHistory: number[]): MarketRegime {
+    if (priceHistory.length < 5) return 'quiet';
+
+    const recent = priceHistory.slice(-20);
+    const mean = recent.reduce((s, v) => s + v, 0) / recent.length;
+    if (mean === 0) return 'quiet';
+
+    // Volatility: stddev / mean
+    const variance = recent.reduce((s, v) => s + (v - mean) ** 2, 0) / recent.length;
+    const stddev = Math.sqrt(variance);
+    const volRatio = stddev / mean;
+
+    // Trend strength: slope of linear regression
+    const n = recent.length;
+    let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+    for (let i = 0; i < n; i++) {
+      sumX += i;
+      sumY += recent[i];
+      sumXY += i * recent[i];
+      sumX2 += i * i;
+    }
+    const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+    const normalizedSlope = Math.abs(slope / mean);
+
+    // A strong trend with any level of volatility is still "trending"
+    if (normalizedSlope > 0.005) return 'trending';
+    if (volRatio > 0.03) return 'volatile';
+    if (volRatio < 0.01 && normalizedSlope < 0.002) return 'quiet';
+    return 'mean_reverting';
+  }
+
+  /**
+   * Hill-climbing weight update: nudge the dominant factor's weight by
+   * +WEIGHT_NUDGE on win, -WEIGHT_NUDGE on loss. Re-normalize to sum=1.
+   */
+  protected updateWeights(outcome: 'win' | 'loss', decision: AgentDecision): void {
+    const mc = decision.marketConditions;
+    const scores: Record<keyof AdaptiveWeights, number> = {
+      trend: (mc.trendScore as number) ?? 0.5,
+      momentum: (mc.momentumScore as number) ?? 0.5,
+      volatility: (mc.volatilityScore as number) ?? 0.5,
+      balance: (mc.balanceScore as number) ?? 0.5,
+    };
+
+    // Find the factor with the highest absolute deviation from 0.5
+    let dominantFactor: keyof AdaptiveWeights = 'trend';
+    let maxDeviation = 0;
+    for (const key of Object.keys(scores) as (keyof AdaptiveWeights)[]) {
+      const dev = Math.abs(scores[key] - 0.5);
+      if (dev > maxDeviation) {
+        maxDeviation = dev;
+        dominantFactor = key;
+      }
+    }
+
+    const oldWeights = { ...this.adaptiveWeights };
+    const nudge = outcome === 'win' ? WEIGHT_NUDGE : -WEIGHT_NUDGE;
+    this.adaptiveWeights[dominantFactor] = Math.max(0.05, this.adaptiveWeights[dominantFactor] + nudge);
+
+    // Normalize to sum=1
+    const sum = Object.values(this.adaptiveWeights).reduce((s, v) => s + v, 0);
+    for (const key of Object.keys(this.adaptiveWeights) as (keyof AdaptiveWeights)[]) {
+      this.adaptiveWeights[key] /= sum;
+    }
+
+    const update: WeightUpdate = {
+      timestamp: Date.now(),
+      oldWeights,
+      newWeights: { ...this.adaptiveWeights },
+      trigger: `hill-climb after ${outcome} trade (dominant: ${dominantFactor})`,
+    };
+    this.weightHistory.push(update);
+    if (this.weightHistory.length > MAX_WEIGHT_HISTORY) {
+      this.weightHistory.splice(0, this.weightHistory.length - MAX_WEIGHT_HISTORY);
+    }
+  }
+
+  /**
+   * Record a calibration data point: bucket the predicted confidence into
+   * 0.1-wide bins and track accuracy.
+   */
+  protected recordCalibration(predictedConfidence: number, wasCorrect: boolean): void {
+    const bucketStart = Math.floor(predictedConfidence * 10) / 10;
+    const bucketKey = `${bucketStart.toFixed(1)}-${(bucketStart + 0.1).toFixed(1)}`;
+
+    const entry = this.confidenceBuckets.get(bucketKey) ?? { total: 0, correct: 0 };
+    entry.total += 1;
+    if (wasCorrect) entry.correct += 1;
+    this.confidenceBuckets.set(bucketKey, entry);
+  }
+
+  /** Return current adaptive weights. */
+  getAdaptiveWeights(): AdaptiveWeights {
+    return { ...this.adaptiveWeights };
+  }
+
+  /** Return the weight update history. */
+  getWeightHistory(): WeightUpdate[] {
+    return [...this.weightHistory];
+  }
+
+  /** Return the currently detected market regime. */
+  getMarketRegime(): MarketRegime {
+    return this.currentRegime;
+  }
+
+  /** Return confidence calibration data across all buckets. */
+  getConfidenceCalibration(): ConfidenceCalibration[] {
+    const result: ConfidenceCalibration[] = [];
+    for (const [bucket, data] of this.confidenceBuckets.entries()) {
+      result.push({
+        predictedBucket: bucket,
+        totalPredictions: data.total,
+        correctPredictions: data.correct,
+        accuracy: data.total > 0 ? data.correct / data.total : 0,
+      });
+    }
+    return result.sort((a, b) => a.predictedBucket.localeCompare(b.predictedBucket));
   }
 
   // ── Policy Engine ──────────────────────────────────────────────────────────

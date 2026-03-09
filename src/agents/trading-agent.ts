@@ -1,13 +1,16 @@
 // SentinelVault — TradingAgent
-// Concrete OODA agent implementing three autonomous trading strategies over a
-// simulated price feed: Dollar-Cost Averaging (dca), momentum, and
-// mean_reversion. All real-money exposure is capped to 0.01 SOL per trade for
-// devnet safety.
+// Concrete OODA agent implementing three autonomous trading strategies with
+// real price feeds (Jupiter/CoinGecko), optional LLM-powered decisions, and
+// Jupiter DEX quote awareness. Falls back gracefully to simulated prices and
+// pure quantitative scoring when APIs are unavailable.
 
 import { v4 as uuidv4 } from 'uuid';
 import { BaseAgent } from './base-agent';
 import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
 import { AgenticWallet } from '../core/wallet';
+import { PriceFeed } from '../integrations/price-feed';
+import { JupiterClient, SOL_MINT, USDC_MINT } from '../integrations/jupiter';
+import { AIAdvisor } from '../integrations/ai-advisor';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -28,6 +31,9 @@ const DCA_CONFIDENCE = 0.6;
 const MOMENTUM_CONFIDENCE = 0.7;
 const HOLD_CONFIDENCE = 0.3;
 
+/** Lamports in 0.01 SOL — used for Jupiter quote sizing. */
+const QUOTE_AMOUNT_LAMPORTS = 10_000_000;
+
 // ─── Strategy-type narrowing ──────────────────────────────────────────────────
 
 type TradingStrategyType = 'dca' | 'momentum' | 'mean_reversion';
@@ -40,6 +46,7 @@ function isTradingStrategy(value: unknown): value is TradingStrategyType {
 
 interface TradingObservations {
   price: number;
+  priceSource: string;
   priceHistory: number[];
   timestamp: number;
   balance: number;
@@ -50,12 +57,16 @@ interface TradingObservations {
 /**
  * Autonomous trading agent for SentinelVault.
  *
- * The agent maintains a local simulated price feed (random walk with mean
- * reversion) and applies one of three strategies on each OODA cycle:
+ * The agent fetches real SOL/USD prices from Jupiter/CoinGecko APIs and falls
+ * back to a local simulated price feed when APIs are unavailable. It applies
+ * one of three strategies on each OODA cycle:
  *
  *  dca            — always buy a small fixed amount regardless of price
  *  momentum       — follow the trend using two SMAs (short vs long)
  *  mean_reversion — fade extreme moves; buy dips, sell rips
+ *
+ * Optional: when ANTHROPIC_API_KEY or OPENAI_API_KEY is set, the agent blends
+ * LLM recommendations with the quantitative signal (60% quant, 40% AI).
  *
  * Actual SOL transfers are submitted via the injected AgenticWallet. Trade
  * size is capped at the lower of MAX_TRADE_AMOUNT_SOL and 10 % of the current
@@ -73,6 +84,12 @@ export class TradingAgent extends BaseAgent {
   private targetAddress: string;
   private readonly maxTradeAmount: number;
   private readonly strategyType: TradingStrategyType;
+
+  // ── Integration clients ─────────────────────────────────────────────────────
+
+  private readonly priceFeed: PriceFeed;
+  private readonly jupiterClient: JupiterClient;
+  private readonly aiAdvisor: AIAdvisor;
 
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -102,6 +119,11 @@ export class TradingAgent extends BaseAgent {
       );
       this.strategyType = 'dca';
     }
+
+    // Initialize integration clients
+    this.priceFeed = new PriceFeed();
+    this.jupiterClient = new JupiterClient();
+    this.aiAdvisor = new AIAdvisor();
   }
 
   // ── Simulated Price Feed ───────────────────────────────────────────────────
@@ -152,15 +174,39 @@ export class TradingAgent extends BaseAgent {
   // ── OODA Phase 1 — Observe ─────────────────────────────────────────────────
 
   /**
-   * Advance the price simulation by one tick, then snapshot the current
-   * environment: price, price history, wall-clock time, and wallet balance.
+   * Gather market data: try real SOL/USD price from APIs first, fall back to
+   * simulated price. Also snapshots wallet balance and wall-clock time.
    */
   protected async observe(): Promise<Record<string, unknown>> {
-    const price = this.simulatePrice();
+    let price: number;
+    let priceSource: string;
+
+    // Try real price feed first
+    const realPrice = await this.priceFeed.getSOLPrice();
+    if (realPrice) {
+      price = realPrice.price;
+      priceSource = realPrice.source;
+
+      // Still maintain priceHistory for SMA calculations
+      if (this.priceHistory.length >= PRICE_HISTORY_MAX) {
+        this.priceHistory.shift();
+      }
+      this.priceHistory.push(price);
+      this.currentPrice = price;
+    } else {
+      // Fall back to simulated price
+      price = this.simulatePrice();
+      priceSource = 'simulated';
+    }
+
     const balance = await this.wallet.getBalance();
+
+    // Detect market regime from price history
+    this.currentRegime = this.detectRegime(this.priceHistory);
 
     const observations: TradingObservations = {
       price,
+      priceSource,
       priceHistory: [...this.priceHistory],
       timestamp: Date.now(),
       balance,
@@ -194,11 +240,13 @@ export class TradingAgent extends BaseAgent {
    *   4. balanceScore   — penalizes when balance < 0.05 SOL (0-1)
    *
    * Weighted confidence = 0.4*trend + 0.3*momentum + 0.2*volatility + 0.1*balance
-   * Each factor contributes to an explainable reasoning chain.
+   *
+   * When an LLM API key is configured, the AI advisor's recommendation is
+   * blended with the quantitative score (60% quant, 40% AI).
    */
   protected async analyze(observations: Record<string, unknown>): Promise<AgentDecision> {
     const obs = observations as unknown as TradingObservations;
-    const { price, timestamp, balance } = obs;
+    const { price, priceSource, timestamp, balance } = obs;
 
     const sma20 = this.sma(SMA_SHORT_PERIOD);
     const sma50 = this.sma(SMA_LONG_PERIOD);
@@ -230,57 +278,106 @@ export class TradingAgent extends BaseAgent {
     const balanceScore = balance >= 0.05 ? 1.0 : Math.max(0, balance / 0.05);
 
     // ── Weighted Confidence ───────────────────────────────────────────────
+    const w = this.adaptiveWeights;
     const rawConfidence =
-      0.4 * trendScore +
-      0.3 * momentumScore +
-      0.2 * volatilityScore +
-      0.1 * balanceScore;
+      w.trend * trendScore +
+      w.momentum * momentumScore +
+      w.volatility * volatilityScore +
+      w.balance * balanceScore;
 
     // ── Reasoning Chain ───────────────────────────────────────────────────
     const reasoningChain: string[] = [
+      `[Price]      $${price.toFixed(2)} (source: ${priceSource})`,
+      `[Regime]     ${this.currentRegime}`,
       `[Trend]      score=${trendScore.toFixed(3)} (${trendDirection}) — SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)}, SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}, diff=${(smaDiff * 100).toFixed(2)}%`,
       `[Momentum]   score=${momentumScore.toFixed(3)} — price change over last ${recentPrices.length} ticks`,
       `[Volatility] score=${volatilityScore.toFixed(3)} — stddev=${vol.toFixed(6)}, normalized=${(normalizedVol * 100).toFixed(2)}%`,
       `[Balance]    score=${balanceScore.toFixed(3)} — ${balance.toFixed(6)} SOL available`,
-      `[Composite]  confidence=${rawConfidence.toFixed(3)} = 0.4×${trendScore.toFixed(3)} + 0.3×${momentumScore.toFixed(3)} + 0.2×${volatilityScore.toFixed(3)} + 0.1×${balanceScore.toFixed(3)}`,
+      `[Weights]    trend=${w.trend.toFixed(3)} momentum=${w.momentum.toFixed(3)} vol=${w.volatility.toFixed(3)} bal=${w.balance.toFixed(3)}`,
+      `[Composite]  confidence=${rawConfidence.toFixed(3)} = ${w.trend.toFixed(2)}×${trendScore.toFixed(3)} + ${w.momentum.toFixed(2)}×${momentumScore.toFixed(3)} + ${w.volatility.toFixed(2)}×${volatilityScore.toFixed(3)} + ${w.balance.toFixed(2)}×${balanceScore.toFixed(3)}`,
     ];
+
+    // ── Jupiter Quote (non-blocking, for transparency) ────────────────────
+    let jupiterQuoteInfo: Record<string, unknown> | null = null;
+    try {
+      const quote = await this.jupiterClient.getQuote({ amount: QUOTE_AMOUNT_LAMPORTS });
+      if (quote) {
+        const outUSDC = (parseFloat(quote.outAmount) / 1e6).toFixed(2);
+        const route = quote.routePlan.map(r => r.swapInfo.label).join(' → ') || 'direct';
+        jupiterQuoteInfo = {
+          inAmount: quote.inAmount,
+          outAmount: quote.outAmount,
+          outUSDC,
+          priceImpactPct: quote.priceImpactPct,
+          route,
+        };
+        reasoningChain.push(`[Jupiter]    0.01 SOL ≈ ${outUSDC} USDC (${route}, ${quote.priceImpactPct}% impact)`);
+      }
+    } catch {
+      // Jupiter quote is optional — no impact on decision
+    }
+
+    // ── AI Advisor (optional LLM blend) ───────────────────────────────────
+    let aiRecommendation: { action: string; confidence: number; reasoning: string } | null = null;
+    let finalConfidence = rawConfidence;
+
+    try {
+      aiRecommendation = await this.aiAdvisor.getTradeRecommendation({
+        solPrice: price,
+        priceSource,
+        priceHistory: this.priceHistory,
+        balance,
+        strategy: this.strategyType,
+        quantitativeSignal: { action: trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold', confidence: rawConfidence },
+      });
+      if (aiRecommendation) {
+        finalConfidence = 0.6 * rawConfidence + 0.4 * aiRecommendation.confidence;
+        reasoningChain.push(`[AI Advisor] ${aiRecommendation.action.toUpperCase()} (confidence: ${aiRecommendation.confidence.toFixed(3)}) — "${aiRecommendation.reasoning}"`);
+        reasoningChain.push(`[Blended]    confidence=${finalConfidence.toFixed(3)} = 0.6×${rawConfidence.toFixed(3)} + 0.4×${aiRecommendation.confidence.toFixed(3)}`);
+      }
+    } catch {
+      // AI advisor is optional — no impact on decision
+    }
 
     // ── Strategy-specific action decision ─────────────────────────────────
     let action: 'buy' | 'sell' | 'hold';
     let confidence: number;
     let reasoning: string;
 
+    // Use blended confidence if AI advisor contributed
+    const effectiveConfidence = aiRecommendation ? finalConfidence : rawConfidence;
+
     switch (this.strategyType) {
       case 'dca': {
         action = 'buy';
-        confidence = Math.max(DCA_CONFIDENCE, rawConfidence);
+        confidence = Math.max(DCA_CONFIDENCE, effectiveConfidence);
         reasoning =
-          `DCA strategy: accumulate regardless of direction. Price: ${price.toFixed(4)} SOL. ` +
-          `Multi-factor confidence: ${rawConfidence.toFixed(3)}.`;
+          `DCA strategy: accumulate regardless of direction. Price: $${price.toFixed(2)} (${priceSource}). ` +
+          `Multi-factor confidence: ${effectiveConfidence.toFixed(3)}.`;
         reasoningChain.push(`[Decision]   DCA always buys — confidence boosted to ${confidence.toFixed(3)}`);
         break;
       }
 
       case 'momentum': {
-        if (rawConfidence > 0.55 && trendDirection === 'bullish') {
+        if (effectiveConfidence > 0.55 && trendDirection === 'bullish') {
           action = 'buy';
-          confidence = rawConfidence;
+          confidence = effectiveConfidence;
           reasoning =
-            `Momentum bullish: composite score ${rawConfidence.toFixed(3)} with uptrend. ` +
+            `Momentum bullish: composite score ${effectiveConfidence.toFixed(3)} with uptrend. ` +
             `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} > SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
           reasoningChain.push(`[Decision]   BUY — bullish trend with confidence ${confidence.toFixed(3)}`);
-        } else if (rawConfidence < 0.45 && trendDirection === 'bearish') {
+        } else if (effectiveConfidence < 0.45 && trendDirection === 'bearish') {
           action = 'sell';
-          confidence = 1 - rawConfidence; // invert: low composite → high sell confidence
+          confidence = 1 - effectiveConfidence; // invert: low composite → high sell confidence
           reasoning =
-            `Momentum bearish: composite score ${rawConfidence.toFixed(3)} with downtrend. ` +
+            `Momentum bearish: composite score ${effectiveConfidence.toFixed(3)} with downtrend. ` +
             `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} < SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
           reasoningChain.push(`[Decision]   SELL — bearish trend with confidence ${confidence.toFixed(3)}`);
         } else {
           action = 'hold';
           confidence = HOLD_CONFIDENCE;
           reasoning =
-            `Momentum indeterminate: composite ${rawConfidence.toFixed(3)}, trend ${trendDirection}. Holding.`;
+            `Momentum indeterminate: composite ${effectiveConfidence.toFixed(3)}, trend ${trendDirection}. Holding.`;
           reasoningChain.push(`[Decision]   HOLD — no clear signal`);
         }
         break;
@@ -292,25 +389,25 @@ export class TradingAgent extends BaseAgent {
 
         if (price < buyLevel) {
           const deviation = (buyLevel - price) / this.basePrice;
-          confidence = Math.min(0.95, rawConfidence + deviation * 5);
+          confidence = Math.min(0.95, effectiveConfidence + deviation * 5);
           action = 'buy';
           reasoning =
-            `Mean reversion: price ${price.toFixed(4)} below buy threshold ${buyLevel.toFixed(4)} ` +
-            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${rawConfidence.toFixed(3)}.`;
+            `Mean reversion: price $${price.toFixed(2)} below buy threshold ${buyLevel.toFixed(4)} ` +
+            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${effectiveConfidence.toFixed(3)}.`;
           reasoningChain.push(`[Decision]   BUY — price below mean reversion threshold, confidence ${confidence.toFixed(3)}`);
         } else if (price > sellLevel) {
           const deviation = (price - sellLevel) / this.basePrice;
-          confidence = Math.min(0.95, (1 - rawConfidence) + deviation * 5);
+          confidence = Math.min(0.95, (1 - effectiveConfidence) + deviation * 5);
           action = 'sell';
           reasoning =
-            `Mean reversion: price ${price.toFixed(4)} above sell threshold ${sellLevel.toFixed(4)} ` +
-            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${rawConfidence.toFixed(3)}.`;
+            `Mean reversion: price $${price.toFixed(2)} above sell threshold ${sellLevel.toFixed(4)} ` +
+            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${effectiveConfidence.toFixed(3)}.`;
           reasoningChain.push(`[Decision]   SELL — price above mean reversion threshold, confidence ${confidence.toFixed(3)}`);
         } else {
           action = 'hold';
           confidence = HOLD_CONFIDENCE;
           reasoning =
-            `Mean reversion: price ${price.toFixed(4)} in neutral zone [${buyLevel.toFixed(4)}, ${sellLevel.toFixed(4)}]. Holding.`;
+            `Mean reversion: price $${price.toFixed(2)} in neutral zone [${buyLevel.toFixed(4)}, ${sellLevel.toFixed(4)}]. Holding.`;
           reasoningChain.push(`[Decision]   HOLD — price in neutral zone`);
         }
         break;
@@ -323,6 +420,7 @@ export class TradingAgent extends BaseAgent {
       timestamp,
       marketConditions: {
         price,
+        priceSource,
         sma20,
         sma50,
         balance,
@@ -333,11 +431,14 @@ export class TradingAgent extends BaseAgent {
         volatilityScore,
         balanceScore,
         compositeConfidence: rawConfidence,
+        aiRecommendation: aiRecommendation ? { action: aiRecommendation.action, confidence: aiRecommendation.confidence } : null,
+        blendedConfidence: aiRecommendation ? finalConfidence : null,
+        jupiterQuote: jupiterQuoteInfo,
         reasoningChain,
       },
-      analysis: `Strategy: ${this.strategyType} | Price: ${price.toFixed(4)} | ` +
+      analysis: `Strategy: ${this.strategyType} | Price: $${price.toFixed(2)} (${priceSource}) | ` +
         `SMA20: ${sma20.toFixed(4)} | SMA50: ${sma50.toFixed(4)} | ` +
-        `Composite: ${rawConfidence.toFixed(3)} | Balance: ${balance.toFixed(6)} SOL`,
+        `Composite: ${rawConfidence.toFixed(3)}${aiRecommendation ? ` | Blended: ${finalConfidence.toFixed(3)}` : ''} | Balance: ${balance.toFixed(6)} SOL`,
       action,
       confidence,
       reasoning,
@@ -390,6 +491,20 @@ export class TradingAgent extends BaseAgent {
       return null;
     }
 
+    // Record swap intent on-chain as a memo for verifiability.
+    // On mainnet, this would be replaced by submitSerializedTransaction()
+    // with the actual Jupiter swap response.
+    const jupiterQuote = decision.marketConditions.jupiterQuote as Record<string, unknown> | null;
+    if (jupiterQuote) {
+      const routeLabel = jupiterQuote.route ?? 'direct';
+      const swapIntent = `SWAP_INTENT: ${amount} SOL -> USDC @ ${jupiterQuote.outAmount} via ${routeLabel}`;
+      try {
+        await this.wallet.sendMemo(swapIntent);
+      } catch {
+        // Memo is best-effort — does not block the trade
+      }
+    }
+
     const action: AgentAction = {
       id: uuidv4(),
       agentId: this.config.id,
@@ -401,7 +516,10 @@ export class TradingAgent extends BaseAgent {
         destination: this.targetAddress,
         amountSol: amount,
         price: decision.marketConditions.price,
+        priceSource: decision.marketConditions.priceSource,
         confidence: decision.confidence,
+        jupiterQuote: decision.marketConditions.jupiterQuote ?? null,
+        aiRecommendation: decision.marketConditions.aiRecommendation ?? null,
       },
       result: {
         id: uuidv4(),
@@ -424,6 +542,23 @@ export class TradingAgent extends BaseAgent {
   /** Update the destination address for trades (e.g. for agent-to-agent wiring). */
   setTargetAddress(address: string): void {
     this.targetAddress = address;
+  }
+
+  // ── Public Getters (Integration Access) ─────────────────────────────────────
+
+  /** Get the PriceFeed instance for external use (e.g. demo scripts). */
+  getPriceFeed(): PriceFeed {
+    return this.priceFeed;
+  }
+
+  /** Get the JupiterClient instance for external use. */
+  getJupiterClient(): JupiterClient {
+    return this.jupiterClient;
+  }
+
+  /** Get the AIAdvisor instance for external use. */
+  getAIAdvisor(): AIAdvisor {
+    return this.aiAdvisor;
   }
 
   // ── Policy Engine Integration ──────────────────────────────────────────────
@@ -471,6 +606,23 @@ export class TradingAgent extends BaseAgent {
     // handled by BaseAgent.wireWalletEvents() — do NOT increment here to
     // avoid double-counting.
     this.performance.totalVolumeSol += amountSol;
+
+    // Adaptive learning: determine win/loss by comparing price direction
+    // to the action taken. A buy is a "win" if price went up since last
+    // tick, and a sell is a "win" if price went down.
+    if (confirmed && this.priceHistory.length >= 2) {
+      const prevPrice = this.priceHistory[this.priceHistory.length - 2];
+      const curPrice = this.priceHistory[this.priceHistory.length - 1];
+      const priceWentUp = curPrice > prevPrice;
+
+      const wasCorrect =
+        (decision.action === 'buy' && priceWentUp) ||
+        (decision.action === 'sell' && !priceWentUp);
+
+      const outcome = wasCorrect ? 'win' : 'loss';
+      this.updateWeights(outcome, decision);
+      this.recordCalibration(decision.confidence, wasCorrect);
+    }
 
     console.log(
       `[${this.config.name}] Decision ${decision.id} evaluated. ` +

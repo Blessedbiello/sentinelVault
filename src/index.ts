@@ -16,6 +16,11 @@ export { TradingAgent } from './agents/trading-agent';
 export { LiquidityAgent } from './agents/liquidity-agent';
 export { AgentOrchestrator } from './agents/orchestrator';
 
+// Integrations
+export { PriceFeed } from './integrations/price-feed';
+export { JupiterClient } from './integrations/jupiter';
+export { AIAdvisor } from './integrations/ai-advisor';
+
 // Dashboard
 export { DashboardServer } from './dashboard/server';
 

@@ -424,6 +424,100 @@ describe('BaseAgent', () => {
     expect(errorHandler).toHaveBeenCalledWith(boom, mockConfig.id);
   });
 
+  // ── 13. Adaptive Learning: detectRegime ───────────────────────────────────
+
+  test('detectRegime returns "quiet" for a flat price history', () => {
+    const prices = Array(20).fill(100);
+    const regime = (agent as any).detectRegime(prices);
+    expect(regime).toBe('quiet');
+  });
+
+  test('detectRegime returns "trending" for a steadily rising price history', () => {
+    const prices = Array.from({ length: 20 }, (_, i) => 100 + i * 2);
+    const regime = (agent as any).detectRegime(prices);
+    expect(regime).toBe('trending');
+  });
+
+  test('detectRegime returns "volatile" for wildly swinging prices', () => {
+    const prices = Array.from({ length: 20 }, (_, i) => 100 + (i % 2 === 0 ? 20 : -20));
+    const regime = (agent as any).detectRegime(prices);
+    expect(regime).toBe('volatile');
+  });
+
+  test('detectRegime returns "quiet" for fewer than 5 data points', () => {
+    const regime = (agent as any).detectRegime([100, 101]);
+    expect(regime).toBe('quiet');
+  });
+
+  // ── 14. Adaptive Learning: updateWeights ──────────────────────────────────
+
+  test('updateWeights nudges weights on win and normalizes to sum=1', () => {
+    const decision = makeDecision({
+      marketConditions: { trendScore: 0.9, momentumScore: 0.5, volatilityScore: 0.5, balanceScore: 0.5 },
+    });
+
+    (agent as any).updateWeights('win', decision);
+
+    const weights = agent.getAdaptiveWeights();
+    const sum = weights.trend + weights.momentum + weights.volatility + weights.balance;
+    expect(sum).toBeCloseTo(1.0, 5);
+    // Trend was dominant (0.9 vs 0.5), so trend weight should increase
+    expect(weights.trend).toBeGreaterThan(0.4);
+  });
+
+  test('updateWeights nudges weights on loss and normalizes to sum=1', () => {
+    const decision = makeDecision({
+      marketConditions: { trendScore: 0.9, momentumScore: 0.5, volatilityScore: 0.5, balanceScore: 0.5 },
+    });
+
+    (agent as any).updateWeights('loss', decision);
+
+    const weights = agent.getAdaptiveWeights();
+    const sum = weights.trend + weights.momentum + weights.volatility + weights.balance;
+    expect(sum).toBeCloseTo(1.0, 5);
+    // Trend was dominant so its weight should decrease on loss
+    expect(weights.trend).toBeLessThan(0.4);
+  });
+
+  // ── 15. Adaptive Learning: recordCalibration ──────────────────────────────
+
+  test('recordCalibration buckets correctly and computes accuracy', () => {
+    (agent as any).recordCalibration(0.75, true);
+    (agent as any).recordCalibration(0.72, false);
+    (agent as any).recordCalibration(0.78, true);
+
+    const calibration = agent.getConfidenceCalibration();
+    expect(calibration).toHaveLength(1);
+    expect(calibration[0].predictedBucket).toBe('0.7-0.8');
+    expect(calibration[0].totalPredictions).toBe(3);
+    expect(calibration[0].correctPredictions).toBe(2);
+    expect(calibration[0].accuracy).toBeCloseTo(2 / 3, 5);
+  });
+
+  // ── 16. History caps ─────────────────────────────────────────────────────
+
+  test('decisionHistory caps at 500 entries', async () => {
+    for (let i = 0; i < 510; i++) {
+      agent.analyze.mockResolvedValueOnce(makeDecision({ id: `dec-${i}`, confidence: 0.3, action: 'hold' }));
+      await triggerCycle(agent);
+    }
+
+    const history = agent.getDecisionHistory();
+    expect(history.length).toBeLessThanOrEqual(500);
+  });
+
+  test('weightHistory caps at 100 entries', () => {
+    const decision = makeDecision({
+      marketConditions: { trendScore: 0.9, momentumScore: 0.5, volatilityScore: 0.5, balanceScore: 0.5 },
+    });
+
+    for (let i = 0; i < 110; i++) {
+      (agent as any).updateWeights('win', decision);
+    }
+
+    expect(agent.getWeightHistory().length).toBeLessThanOrEqual(100);
+  });
+
   // ── Supplemental: auto-recovery does NOT fire if agent is stopped ──────────
 
   test('auto-recovery does not call resume() when the agent is explicitly stopped before the delay elapses', async () => {
