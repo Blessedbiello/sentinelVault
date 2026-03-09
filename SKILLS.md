@@ -269,8 +269,8 @@ Orchestrator defaults (constructor config):
 |-----------------------|-------------------|----------------|--------------------------------------------------|
 | `trader`              | `TradingAgent`    | Implemented    | Autonomous trading with real/simulated prices + AI |
 | `liquidity_provider`  | `LiquidityAgent`  | Implemented    | Simulated LP pool management and rebalancing      |
-| `arbitrageur`         | (TradingAgent)    | Stub           | Falls back to TradingAgent; dedicated impl pending|
-| `portfolio_manager`   | (TradingAgent)    | Stub           | Falls back to TradingAgent; dedicated impl pending|
+| `arbitrageur`         | `ArbitrageAgent`  | Implemented    | Cross-DEX price monitoring with arbitrage intent recording |
+| `portfolio_manager`   | `PortfolioAgent`  | Implemented    | Multi-asset portfolio rebalancing with drift detection     |
 
 ### Trading Strategies
 
@@ -294,7 +294,7 @@ Each strategy accepts a `riskLevel` parameter: `conservative`, `moderate`, or `a
 - **Simulated prices (fallback)** -- The TradingAgent uses real Jupiter/CoinGecko prices by default, but falls back to a local random-walk simulation when APIs are unreachable. The LiquidityAgent simulates pool state internally.
 - **0.01 SOL trade cap** -- Each TradingAgent trade is hard-capped at 0.01 SOL (and never more than 10% of wallet balance) to protect devnet funds.
 - **No real DEX execution** -- Trades are SOL transfers to a target address, not actual swaps on a DEX (Jupiter quotes are fetched for transparency but execution is devnet SOL transfers). SPL token operations use real on-chain mint/transfer via `@solana/spl-token`.
-- **Arbitrageur and portfolio manager** -- These agent types fall back to TradingAgent; dedicated implementations are not yet available.
+- **Arbitrageur and portfolio manager** -- ArbitrageAgent uses a simulated alternative DEX price (not a real second DEX). PortfolioAgent tracks target allocation but rebalancing is signaled via micro-transfers, not actual DEX swaps.
 - **Single-process** -- All agents run in a single Node.js process. No distributed coordination or persistence across restarts.
 - **No mainnet safeguards** -- There is no multi-sig, hardware wallet integration, or human-in-the-loop approval workflow.
 - **Airdrop rate limits** -- Devnet airdrops are rate-limited by Solana. Sequential funding with 5-second delays is used, but failures are possible under load.
