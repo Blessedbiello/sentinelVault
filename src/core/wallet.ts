@@ -22,16 +22,21 @@ import {
   TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
 import { KeystoreManager } from './keystore';
+import { PolicyEngine } from '../security/policy-engine';
 import {
   WalletConfig,
   WalletState,
   WalletStatus,
   SolanaCluster,
   TokenBalance,
+  TransactionValidationParams,
 } from '../types';
 
 /** Memo Program v2 address. */
 const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+
+/** System Program address for policy validation. */
+const SYSTEM_PROGRAM_ADDRESS = '11111111111111111111111111111111';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -68,6 +73,7 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   private readonly keystoreManager: KeystoreManager;
   private readonly password: string;
 
+  private policyEngine: PolicyEngine | null = null;
   private state: WalletState | null = null;
   private keystoreId: string | null = null;
   private connection: Connection | null = null;
@@ -204,6 +210,14 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       throw new Error(`Transfer amount must be positive, got ${amountSol}`);
     }
 
+    // Policy gate: validate spending limits, rate limits, and allowlists
+    this.enforcePolicy({
+      amountSol,
+      destination,
+      programId: SYSTEM_PROGRAM_ADDRESS,
+      type: 'transfer_sol',
+    });
+
     const fromPubkey = new PublicKey(this.state!.publicKey);
     const toPubkey = new PublicKey(destination);
     const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
@@ -212,7 +226,14 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       SystemProgram.transfer({ fromPubkey, toPubkey, lamports }),
     );
 
-    return this.signAndSendTransaction(transaction);
+    const signature = await this.signAndSendTransaction(transaction);
+
+    // Record the confirmed spend in the policy engine's rolling windows
+    if (this.policyEngine) {
+      this.policyEngine.recordTransaction(amountSol);
+    }
+
+    return signature;
   }
 
   /**
@@ -229,6 +250,14 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
     amount: number,
   ): Promise<string> {
     this.assertReady();
+
+    // Policy gate: validate the SPL Token program is allowlisted
+    this.enforcePolicy({
+      amountSol: 0, // SPL transfers don't spend SOL (beyond fees)
+      destination,
+      programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+      type: 'transfer_spl',
+    });
 
     const connection = this.connection!;
     const mintPubkey = new PublicKey(mint);
@@ -521,6 +550,22 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
     this.emit('wallet:unlocked');
   }
 
+  // ── Policy Engine ──────────────────────────────────────────────────────────
+
+  /**
+   * Attach a PolicyEngine to enforce spending limits, rate limits, and
+   * program allowlists at the wallet level. When set, every SOL and SPL
+   * transfer is validated against the policy chain before signing.
+   */
+  setPolicyEngine(engine: PolicyEngine): void {
+    this.policyEngine = engine;
+  }
+
+  /** Return the attached PolicyEngine, or null if none is set. */
+  getPolicyEngine(): PolicyEngine | null {
+    return this.policyEngine;
+  }
+
   // ── Accessors ───────────────────────────────────────────────────────────────
 
   /**
@@ -580,6 +625,22 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   }
 
   // ── Private Helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Validate a prospective transaction against the attached PolicyEngine.
+   * No-op when no policy engine is set. Throws on policy violation so that
+   * callers never need to check a return value.
+   */
+  private enforcePolicy(params: TransactionValidationParams): void {
+    if (!this.policyEngine) return;
+
+    const result = this.policyEngine.validateTransaction(params);
+    if (!result.allowed) {
+      const error = new Error(`Policy violation: ${result.reason}`);
+      this.emit('transaction:failed', error, 'policy_violation');
+      throw error;
+    }
+  }
 
   /** Instantiate a Solana Connection using the config RPC endpoint or the
    *  cluster default. */

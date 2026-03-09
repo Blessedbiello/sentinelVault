@@ -37,7 +37,7 @@ SentinelVault is organized as a four-layer stack where each layer depends only o
 |        PolicyEngine  |  AuditLogger                  |
 +-----------------------------------------------------+
 |                      Core Layer                       |
-|   KeystoreManager  |  AgenticWallet  |  TransactionEngine  |
+|         KeystoreManager  |  AgenticWallet          |
 +-----------------------------------------------------+
 |                  Solana (devnet / mainnet)            |
 +-----------------------------------------------------+
@@ -92,7 +92,9 @@ try {
 }
 ```
 
-The derived encryption key itself is also wiped after use inside the `KeystoreManager.encrypt()` and `decrypt()` methods via the private `secureWipe()` helper. At no point does key material persist in memory beyond the scope of a single operation.
+The derived encryption key itself is also wiped after use inside the `KeystoreManager.encrypt()` and `decrypt()` methods via the private `secureWipe()` helper. Secret key bytes (the Ed25519 keypair) never persist in memory beyond the scope of a single operation.
+
+**Password lifecycle.** The wallet password is retained in memory for the wallet's lifetime because the agent must decrypt the keypair autonomously for each transaction. This is an intentional design trade-off: an autonomous agent cannot prompt for a password interactively. The password is a string, not raw key material -- it must still pass through PBKDF2 (100,000 iterations) to derive the decryption key, so possession of the password alone does not yield the private key without the keystore file's unique salt. In production deployments, we recommend sourcing the password from a secure vault (e.g. HashiCorp Vault, AWS Secrets Manager) and restricting process memory access via OS-level controls.
 
 ### Filesystem Hardening
 
@@ -111,26 +113,17 @@ Request  -->  Policy Validation  -->  Signing  -->  Submission  -->  Confirmatio
               [BLOCKED]                            [RETRY with backoff]
 ```
 
-### Priority Queue
+### Transaction Signing Pipeline
 
-The `TransactionEngine` maintains four priority buckets: `critical`, `high`, `medium`, and `low`. When `processQueue()` is called, it drains from the highest-priority non-empty bucket first, ensuring that time-sensitive operations (liquidation protection, for example) are never starved by routine DCA purchases.
-
-Each priority level maps to a recommended priority fee in microlamports for use with Solana's `ComputeBudgetProgram`:
-
-| Priority | Fee (microlamports) |
-|----------|-------------------|
-| Critical | 100,000 |
-| High | 50,000 |
-| Medium | 10,000 |
-| Low | 1,000 |
+The `AgenticWallet.signAndSendTransaction()` method is the critical path for all on-chain interactions. It follows a strict sequence: decrypt keypair → attach fresh blockhash → sign → broadcast → confirm → wipe key. The keypair is wiped in a `finally` block regardless of outcome, ensuring that secret key material never persists beyond a single operation.
 
 ### Retry with Exponential Backoff
 
-Failed transactions are retried up to a configurable maximum (default: 3). The delay between retries follows exponential backoff: `baseDelay * 2^attempt`, capped at 30 seconds. This prevents hammering the RPC endpoint during transient outages while ensuring rapid recovery once the issue resolves.
+The airdrop mechanism retries up to 3 times with exponential backoff: `baseDelay * 2^attempt`, capped at a reasonable ceiling. This prevents hammering the RPC endpoint during transient outages while ensuring rapid recovery once the issue resolves.
 
 ### Metrics
 
-The engine maintains rolling aggregate metrics -- total submitted, confirmed, failed, retries, average confirmation time, and cumulative fees paid -- computed incrementally as each transaction reaches a terminal state. These metrics feed into the orchestrator's system-wide dashboard without requiring any batch aggregation.
+The orchestrator maintains rolling aggregate metrics -- total transactions, successful vs. failed, total volume, and average TPS -- computed from agent performance data. The wallet emits `transaction:confirmed` and `transaction:failed` events that feed the agent's performance counters, which in turn feed the orchestrator's system-wide dashboard without requiring any batch aggregation.
 
 ---
 
@@ -342,7 +335,7 @@ The effective trade size is `min(0.01, balance × 0.1)`, and the trade is only e
 
 SentinelVault is designed as an extensible framework, not a finished product. The architecture explicitly anticipates several expansion vectors:
 
-**Jupiter and Raydex Integration.** The `allowedPrograms` policy field and the `TransactionEngine`'s generic executor callback are designed to accommodate arbitrary Solana programs. Adding Jupiter swap routing requires implementing a new execution strategy in the agent layer while the security and core layers remain unchanged.
+**Jupiter and Raydium Integration.** The `allowedPrograms` policy field is designed to accommodate arbitrary Solana programs. Adding Jupiter swap routing requires implementing a new execution strategy in the agent layer and adding the Jupiter program IDs to the allowlist, while the security and core layers remain unchanged.
 
 **On-Chain Governance.** The `PolicyEngine.updatePolicy()` method accepts partial policy updates at runtime. Moving policy storage on-chain -- where updates require multi-sig approval or DAO vote -- would replace the in-memory policy object with an on-chain account read, preserving the same validation interface.
 

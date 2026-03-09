@@ -5,7 +5,6 @@
 export { KeystoreManager, createKeystoreManager } from './core/keystore';
 export type { CreatedWalletResult, KeystoreSummary } from './core/keystore';
 export { AgenticWallet } from './core/wallet';
-export { TransactionEngine } from './core/transaction-engine';
 
 // Security
 export { PolicyEngine } from './security/policy-engine';

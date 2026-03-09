@@ -89,6 +89,10 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   private readonly alerts: AlertEntry[] = [];
 
+  // ── Recent Transaction Signatures (newest last) ───────────────────────────
+
+  private readonly recentTxSignatures: { agentId: string; signature: string; timestamp: number }[] = [];
+
   // ── Uptime ─────────────────────────────────────────────────────────────────
 
   private readonly startTime: number;
@@ -178,7 +182,10 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     const agent = this.instantiateAgent(agentConfig, wallet);
 
     // ── Policy Engine Wiring ──────────────────────────────────────────────────
+    // Enforce policy at both the wallet level (direct API calls) and the agent
+    // level (OODA loop decisions) for defense in depth.
 
+    wallet.setPolicyEngine(policyEngine);
     agent.setPolicyEngine(policyEngine);
 
     // ── Event Wiring ──────────────────────────────────────────────────────────
@@ -420,7 +427,15 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     return {
       agents: this.getAgentStates(),
       systemMetrics: this.getSystemMetrics(),
-      recentTransactions: [], // Placeholder: per-agent tx history not yet aggregated.
+      recentTransactions: this.recentTxSignatures.slice(-20).reverse().map((tx) => ({
+        id: tx.signature,
+        request: { id: tx.signature, agentId: tx.agentId, walletId: tx.agentId, type: 'transfer_sol' as const, priority: 'medium' as const, maxRetries: 0, simulateFirst: false, metadata: {}, createdAt: tx.timestamp },
+        result: { id: tx.signature, signature: tx.signature, status: 'confirmed' as const, slot: 0, blockTime: null, fee: 0, error: null, logs: [], duration: 0 },
+        attempts: 1,
+        createdAt: tx.timestamp,
+        completedAt: tx.timestamp,
+        status: 'completed' as const,
+      })),
       recentAuditEntries: this.auditLogger.getRecentEntries(20),
       alerts: [...this.alerts],
     };
@@ -626,6 +641,14 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
         'wallet:funded',
         { signature, amountSol },
       );
+    });
+
+    wallet.on('transaction:confirmed', (signature) => {
+      this.recentTxSignatures.push({ agentId, signature, timestamp: Date.now() });
+      // Keep only the most recent 50 entries
+      if (this.recentTxSignatures.length > 50) {
+        this.recentTxSignatures.shift();
+      }
     });
 
     wallet.on('transaction:failed', (error) => {

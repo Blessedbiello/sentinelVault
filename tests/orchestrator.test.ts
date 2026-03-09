@@ -20,6 +20,8 @@ jest.mock('../src/core/wallet', () => ({
       status: 'active',
     }),
     requestAirdrop: jest.fn().mockResolvedValue('mock-sig'),
+    setPolicyEngine: jest.fn(),
+    getPolicyEngine: jest.fn().mockReturnValue(null),
     on: jest.fn(),
     emit: jest.fn(),
   })),

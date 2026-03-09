@@ -176,24 +176,42 @@ async function airdropWithRetry(
     // ═══════════════════════════════════════════════════════════════════════
 
     section('Step 2 — Funding via Airdrop');
-    console.log(chalk.gray(`  Requesting ${AIRDROP_AMOUNT_SOL} SOL per agent with ${AIRDROP_DELAY_MS / 1000}s delay...`));
 
+    // Check existing balances first — if wallets are already funded (e.g. from
+    // a previous run or pre-funded addresses), skip the airdrop entirely.
+    // This prevents failures when devnet rate-limits airdrop requests.
+    let alphaBalance = 0;
+    let betaBalance = 0;
+    try { alphaBalance = await alphaWallet.getBalance(); } catch {}
+    try { betaBalance = await betaWallet.getBalance(); } catch {}
+
+    const MIN_BALANCE_SOL = 0.5; // minimum needed for demo operations
     let fundingOk = true;
 
-    const sig1 = await airdropWithRetry(alphaWallet, AIRDROP_AMOUNT_SOL, 'Alpha');
-    if (sig1) {
-      ok(`Alpha funded — sig: ${sig1.slice(0, 16)}...`);
+    if (alphaBalance >= MIN_BALANCE_SOL) {
+      ok(`Alpha already funded: ${alphaBalance.toFixed(4)} SOL — skipping airdrop`);
     } else {
-      fundingOk = false;
+      console.log(chalk.gray(`  Requesting ${AIRDROP_AMOUNT_SOL} SOL for Alpha...`));
+      const sig1 = await airdropWithRetry(alphaWallet, AIRDROP_AMOUNT_SOL, 'Alpha');
+      if (sig1) {
+        ok(`Alpha funded — sig: ${sig1.slice(0, 16)}...`);
+      } else {
+        fundingOk = false;
+      }
     }
 
     await sleep(AIRDROP_DELAY_MS);
 
-    const sig2 = await airdropWithRetry(betaWallet, AIRDROP_AMOUNT_SOL, 'Beta');
-    if (sig2) {
-      ok(`Beta funded  — sig: ${sig2.slice(0, 16)}...`);
+    if (betaBalance >= MIN_BALANCE_SOL) {
+      ok(`Beta already funded:  ${betaBalance.toFixed(4)} SOL — skipping airdrop`);
     } else {
-      fundingOk = false;
+      console.log(chalk.gray(`  Requesting ${AIRDROP_AMOUNT_SOL} SOL for Beta...`));
+      const sig2 = await airdropWithRetry(betaWallet, AIRDROP_AMOUNT_SOL, 'Beta');
+      if (sig2) {
+        ok(`Beta funded  — sig: ${sig2.slice(0, 16)}...`);
+      } else {
+        fundingOk = false;
+      }
     }
 
     if (!fundingOk) {
@@ -201,27 +219,49 @@ async function airdropWithRetry(
       warn('SPL and on-chain steps may be skipped.');
     }
 
-    // Check balances
-    let alphaBalance = 0;
-    let betaBalance = 0;
-    try {
-      alphaBalance = await alphaWallet.getBalance();
-    } catch (e: any) {
+    // Refresh balances after funding
+    try { alphaBalance = await alphaWallet.getBalance(); } catch (e: any) {
       warn(`Alpha balance fetch failed: ${(e.message ?? String(e)).slice(0, 60)}`);
     }
-    try {
-      betaBalance = await betaWallet.getBalance();
-    } catch (e: any) {
+    try { betaBalance = await betaWallet.getBalance(); } catch (e: any) {
       warn(`Beta balance fetch failed: ${(e.message ?? String(e)).slice(0, 60)}`);
     }
     info(`Alpha balance: ${alphaBalance.toFixed(4)} SOL`);
     info(`Beta  balance: ${betaBalance.toFixed(4)} SOL`);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 3: SPL Token Demo
+    // STEP 3: SOL Transfer (Agent-to-Agent)
     // ═══════════════════════════════════════════════════════════════════════
 
-    section('Step 3 — SPL Token Operations');
+    section('Step 3 — SOL Transfer (Alpha → Beta)');
+
+    if (alphaBalance >= 0.2) {
+      try {
+        const transferAmount = 0.1;
+        console.log(chalk.gray(`  Alpha transferring ${transferAmount} SOL to Beta...`));
+        const solTransferSig = await alphaWallet.transferSOL(betaPubkey, transferAmount);
+        ok(`SOL transfer — sig: ${solTransferSig.slice(0, 16)}...`);
+        info(explorerUrl(solTransferSig, 'tx'));
+
+        // Refresh balances after transfer
+        try { alphaBalance = await alphaWallet.getBalance(); } catch {}
+        try { betaBalance = await betaWallet.getBalance(); } catch {}
+        info(`Alpha balance: ${alphaBalance.toFixed(4)} SOL`);
+        info(`Beta  balance: ${betaBalance.toFixed(4)} SOL`);
+        ok('Agent-to-agent SOL transfer verified');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        warn(`SOL transfer failed: ${msg}`);
+      }
+    } else {
+      warn('Insufficient balance for SOL transfer — skipping.');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 4: SPL Token Demo
+    // ═══════════════════════════════════════════════════════════════════════
+
+    section('Step 4 — SPL Token Operations');
 
     let mintAddress: string | null = null;
 
@@ -267,7 +307,7 @@ async function airdropWithRetry(
     // STEP 4: Memo Program Interaction
     // ═══════════════════════════════════════════════════════════════════════
 
-    section('Step 4 — Memo Program (dApp Interaction)');
+    section('Step 5 — Memo Program (dApp Interaction)');
 
     if (alphaBalance >= 0.01) {
       try {
@@ -301,7 +341,7 @@ async function airdropWithRetry(
     // STEP 5: Agent-to-Agent Trading
     // ═══════════════════════════════════════════════════════════════════════
 
-    section('Step 5 — Agent-to-Agent Independent Trading');
+    section('Step 6 — Agent-to-Agent Independent Trading');
 
     // Wire agents to target each other's wallets
     // We need to update strategy params. Since agents are already created,
@@ -418,7 +458,7 @@ async function airdropWithRetry(
     // STEP 6: Final Report
     // ═══════════════════════════════════════════════════════════════════════
 
-    section('Step 6 — Final Report');
+    section('Step 7 — Final Report');
 
     // Stop agents
     orchestrator.stopAll();
@@ -501,7 +541,7 @@ async function airdropWithRetry(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 7: Shutdown
+    // STEP 8: Shutdown
     // ═══════════════════════════════════════════════════════════════════════
 
     section('Shutdown');

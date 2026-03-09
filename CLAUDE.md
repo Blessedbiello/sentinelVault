@@ -34,7 +34,6 @@ src/
   core/
     keystore.ts             # AES-256-GCM encrypted keystore manager
     wallet.ts               # AgenticWallet -- event-driven wallet for agents
-    transaction-engine.ts   # Transaction submission utilities
   security/
     policy-engine.ts        # 8-layer security validation chain
     audit-logger.ts         # Structured audit log with risk scoring
