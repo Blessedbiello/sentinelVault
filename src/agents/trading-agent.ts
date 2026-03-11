@@ -5,6 +5,7 @@
 // pure quantitative scoring when APIs are unavailable.
 
 import { v4 as uuidv4 } from 'uuid';
+import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { BaseAgent } from './base-agent';
 import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
 import { AgenticWallet } from '../core/wallet';
@@ -84,6 +85,11 @@ export class TradingAgent extends BaseAgent {
   private targetAddress: string;
   private readonly maxTradeAmount: number;
   private readonly strategyType: TradingStrategyType;
+
+  // ── AMM pool integration ────────────────────────────────────────────────────
+
+  private poolMint: string | null = null;
+  private poolAuthority: string | null = null;
 
   // ── Integration clients ─────────────────────────────────────────────────────
 
@@ -204,6 +210,9 @@ export class TradingAgent extends BaseAgent {
     // Detect market regime from price history
     this.currentRegime = this.detectRegime(this.priceHistory);
 
+    // Process deferred outcomes from previous cycles
+    this.processPendingOutcomes(price);
+
     const observations: TradingObservations = {
       price,
       priceSource,
@@ -239,7 +248,7 @@ export class TradingAgent extends BaseAgent {
    *   3. volatilityScore — inverse of stddev; penalizes high volatility (0-1)
    *   4. balanceScore   — penalizes when balance < 0.05 SOL (0-1)
    *
-   * Weighted confidence = 0.4*trend + 0.3*momentum + 0.2*volatility + 0.1*balance
+   * Weighted confidence uses adaptive weights (EMA-updated based on multi-tick trade outcomes)
    *
    * When an LLM API key is configured, the AI advisor's recommendation is
    * blended with the quantitative score (60% quant, 40% AI).
@@ -344,8 +353,18 @@ export class TradingAgent extends BaseAgent {
     let confidence: number;
     let reasoning: string;
 
-    // Use blended confidence if AI advisor contributed
-    const effectiveConfidence = aiRecommendation ? finalConfidence : rawConfidence;
+    // Use blended confidence if AI advisor contributed, then apply regime + calibration
+    const preAdjusted = aiRecommendation ? finalConfidence : rawConfidence;
+    const trendAction = trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold';
+    const regimeScaled = this.applyRegimeScaling(preAdjusted, trendAction);
+    const effectiveConfidence = this.getCalibrationAdjustment(regimeScaled);
+
+    if (regimeScaled !== preAdjusted) {
+      reasoningChain.push(`[Regime Adj] ${this.currentRegime} → confidence ${preAdjusted.toFixed(3)} → ${regimeScaled.toFixed(3)}`);
+    }
+    if (effectiveConfidence !== regimeScaled) {
+      reasoningChain.push(`[Calibrated] adjusted to ${effectiveConfidence.toFixed(3)} based on historical accuracy`);
+    }
 
     switch (this.strategyType) {
       case 'dca': {
@@ -480,28 +499,108 @@ export class TradingAgent extends BaseAgent {
     }
 
     let signature: string;
+    let actionType: string;
 
-    try {
-      signature = await this.wallet.transferSOL(this.targetAddress, amount);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[${this.config.name}] Transfer failed for decision ${decision.id}: ${message}`,
-      );
-      return null;
-    }
-
-    // Record swap intent on-chain as a memo for verifiability.
-    // On mainnet, this would be replaced by submitSerializedTransaction()
-    // with the actual Jupiter swap response.
-    const jupiterQuote = decision.marketConditions.jupiterQuote as Record<string, unknown> | null;
-    if (jupiterQuote) {
-      const routeLabel = jupiterQuote.route ?? 'direct';
-      const swapIntent = `SWAP_INTENT: ${amount} SOL -> USDC @ ${jupiterQuote.outAmount} via ${routeLabel}`;
+    // Try AMM swap if pool is configured, otherwise fall back to transferSOL
+    if (this.poolMint && decision.action === 'buy') {
       try {
-        await this.wallet.sendMemo(swapIntent);
-      } catch {
-        // Memo is best-effort — does not block the trade
+        const lamports = Math.round(amount * LAMPORTS_PER_SOL);
+        signature = await this.wallet.swapSolForToken(
+          this.poolMint,
+          lamports,
+          0, // min_token_out = 0 (accept any amount for devnet)
+          this.poolAuthority ?? undefined,
+        );
+        actionType = 'swap_sol_for_token:buy';
+
+        // Record swap memo
+        try {
+          await this.wallet.sendMemo(
+            `SWAP: ${amount} SOL → SENTINEL @ pool ${this.poolMint.slice(0, 8)}...`,
+          );
+        } catch {
+          // Memo is best-effort
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[${this.config.name}] AMM swap failed, falling back to transferSOL: ${message}`,
+        );
+        // Fall back to plain transfer
+        try {
+          signature = await this.wallet.transferSOL(this.targetAddress, amount);
+          actionType = 'transfer_sol:buy';
+        } catch (err2) {
+          const message2 = err2 instanceof Error ? err2.message : String(err2);
+          console.error(`[${this.config.name}] Transfer also failed: ${message2}`);
+          return null;
+        }
+      }
+    } else if (this.poolMint && decision.action === 'sell') {
+      try {
+        // Get token balance to determine sell amount
+        const tokenBalances = await this.wallet.getTokenBalances();
+        const tokenBalance = tokenBalances.find(tb => tb.mint === this.poolMint);
+        const tokenAmount = tokenBalance ? Math.floor(tokenBalance.balance * 0.1) : 0;
+
+        if (tokenAmount > 0) {
+          signature = await this.wallet.swapTokenForSol(
+            this.poolMint,
+            tokenAmount,
+            0, // min_sol_out = 0
+            this.poolAuthority ?? undefined,
+          );
+          actionType = 'swap_token_for_sol:sell';
+
+          try {
+            await this.wallet.sendMemo(
+              `SWAP: ${tokenAmount} SENTINEL → SOL @ pool ${this.poolMint.slice(0, 8)}...`,
+            );
+          } catch {
+            // Memo is best-effort
+          }
+        } else {
+          // No tokens to sell, fall back to transferSOL
+          signature = await this.wallet.transferSOL(this.targetAddress, amount);
+          actionType = 'transfer_sol:sell';
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[${this.config.name}] AMM swap failed, falling back to transferSOL: ${message}`,
+        );
+        try {
+          signature = await this.wallet.transferSOL(this.targetAddress, amount);
+          actionType = 'transfer_sol:sell';
+        } catch (err2) {
+          const message2 = err2 instanceof Error ? err2.message : String(err2);
+          console.error(`[${this.config.name}] Transfer also failed: ${message2}`);
+          return null;
+        }
+      }
+    } else {
+      // No poolMint — use traditional transfer
+      try {
+        signature = await this.wallet.transferSOL(this.targetAddress, amount);
+        actionType = decision.action === 'buy' ? 'transfer_sol:buy' : 'transfer_sol:sell';
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[${this.config.name}] Transfer failed for decision ${decision.id}: ${message}`,
+        );
+        return null;
+      }
+
+      // Record swap intent on-chain as a memo for verifiability.
+      const jupiterQuote = decision.marketConditions.jupiterQuote as Record<string, unknown> | null;
+      if (jupiterQuote) {
+        const routeLabel = jupiterQuote.route ?? 'direct';
+        const swapIntent = `SWAP_INTENT: ${amount} SOL -> USDC @ ${jupiterQuote.outAmount} via ${routeLabel}`;
+        try {
+          await this.wallet.sendMemo(swapIntent);
+        } catch {
+          // Memo is best-effort — does not block the trade
+        }
       }
     }
 
@@ -509,7 +608,7 @@ export class TradingAgent extends BaseAgent {
       id: uuidv4(),
       agentId: this.config.id,
       timestamp: Date.now(),
-      type: decision.action === 'buy' ? 'transfer_sol:buy' : 'transfer_sol:sell',
+      type: actionType,
       details: {
         strategy: this.strategyType,
         decisionId: decision.id,
@@ -518,6 +617,7 @@ export class TradingAgent extends BaseAgent {
         price: decision.marketConditions.price,
         priceSource: decision.marketConditions.priceSource,
         confidence: decision.confidence,
+        poolMint: this.poolMint,
         jupiterQuote: decision.marketConditions.jupiterQuote ?? null,
         aiRecommendation: decision.marketConditions.aiRecommendation ?? null,
       },
@@ -542,6 +642,17 @@ export class TradingAgent extends BaseAgent {
   /** Update the destination address for trades (e.g. for agent-to-agent wiring). */
   setTargetAddress(address: string): void {
     this.targetAddress = address;
+  }
+
+  /** Set the pool mint for AMM swap execution. When set, execute() uses real swaps. */
+  setPoolMint(mint: string, authority?: string): void {
+    this.poolMint = mint;
+    this.poolAuthority = authority ?? null;
+  }
+
+  /** Return current pool mint, or null if not configured. */
+  getPoolMint(): string | null {
+    return this.poolMint;
   }
 
   // ── Public Getters (Integration Access) ─────────────────────────────────────
@@ -582,16 +693,15 @@ export class TradingAgent extends BaseAgent {
   // ── OODA Phase 4 — Evaluate ───────────────────────────────────────────────
 
   /**
-   * Update performance metrics based on the executed action outcome.
-   * Volume is accumulated from confirmed transfers; successful/failed
-   * transaction counters are incremented accordingly.
+   * Update performance metrics and queue deferred outcome evaluation.
+   * Volume is accumulated from confirmed transfers; win/loss determination
+   * is deferred by OUTCOME_EVAL_TICKS cycles for more reliable feedback.
    */
   protected async evaluate(
     action: AgentAction | null,
     decision: AgentDecision,
   ): Promise<void> {
     if (action === null) {
-      // Nothing was executed — log the skipped decision and return early.
       console.log(
         `[${this.config.name}] Decision ${decision.id} not executed. ` +
         `Action: ${decision.action}, Confidence: ${decision.confidence.toFixed(2)}.`,
@@ -600,36 +710,57 @@ export class TradingAgent extends BaseAgent {
     }
 
     const amountSol = action.details.amountSol as number;
-    const confirmed = action.result?.status === 'confirmed';
 
     // Accumulate trade volume. Transaction counters (successful/failed) are
-    // handled by BaseAgent.wireWalletEvents() — do NOT increment here to
-    // avoid double-counting.
+    // handled by BaseAgent.wireWalletEvents() — do NOT increment here.
     this.performance.totalVolumeSol += amountSol;
 
-    // Adaptive learning: determine win/loss by comparing price direction
-    // to the action taken. A buy is a "win" if price went up since last
-    // tick, and a sell is a "win" if price went down.
-    if (confirmed && this.priceHistory.length >= 2) {
-      const prevPrice = this.priceHistory[this.priceHistory.length - 2];
-      const curPrice = this.priceHistory[this.priceHistory.length - 1];
-      const priceWentUp = curPrice > prevPrice;
-
-      const wasCorrect =
-        (decision.action === 'buy' && priceWentUp) ||
-        (decision.action === 'sell' && !priceWentUp);
-
-      const outcome = wasCorrect ? 'win' : 'loss';
-      this.updateWeights(outcome, decision);
-      this.recordCalibration(decision.confidence, wasCorrect);
-    }
+    // Queue pending outcome for multi-tick deferred evaluation
+    this.queuePendingOutcome(decision, this.currentPrice);
 
     console.log(
-      `[${this.config.name}] Decision ${decision.id} evaluated. ` +
+      `[${this.config.name}] Decision ${decision.id} queued for evaluation. ` +
       `Action: ${decision.action}, Amount: ${amountSol.toFixed(6)} SOL, ` +
-      `Confirmed: ${confirmed}, ` +
       `Signature: ${action.result?.signature ?? 'N/A'}, ` +
       `Total volume: ${this.performance.totalVolumeSol.toFixed(6)} SOL.`,
     );
+  }
+
+  /**
+   * Override processPendingOutcomes to also wire AI advisor feedback.
+   * When outcomes resolve, the AI advisor receives the result so its
+   * future prompts include outcome history.
+   */
+  protected processPendingOutcomes(currentPrice: number): void {
+    const resolved: { outcome: 'win' | 'loss'; po: import('../types').PendingOutcome }[] = [];
+    const remaining: import('../types').PendingOutcome[] = [];
+
+    for (const po of this.pendingOutcomes) {
+      po.ticksRemaining -= 1;
+      if (po.ticksRemaining <= 0) {
+        const priceWentUp = currentPrice > po.entryPrice;
+        const wasCorrect =
+          (po.action === 'buy' && priceWentUp) ||
+          (po.action === 'sell' && !priceWentUp);
+        const outcome = wasCorrect ? 'win' : 'loss';
+        resolved.push({ outcome, po });
+      } else {
+        remaining.push(po);
+      }
+    }
+
+    this.pendingOutcomes = remaining;
+
+    for (const { outcome, po } of resolved) {
+      this.updateWeights(outcome, po.decision);
+      this.recordCalibration(po.confidence, outcome === 'win');
+
+      // Wire AI advisor feedback loop
+      try {
+        this.aiAdvisor.recordOutcome(outcome);
+      } catch {
+        // AI advisor is optional
+      }
+    }
   }
 }

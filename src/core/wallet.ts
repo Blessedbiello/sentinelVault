@@ -12,6 +12,9 @@ import {
   PublicKey,
   LAMPORTS_PER_SOL,
   sendAndConfirmTransaction,
+  StakeProgram,
+  Authorized,
+  Lockup,
 } from '@solana/web3.js';
 import {
   createMint,
@@ -23,6 +26,7 @@ import {
 } from '@solana/spl-token';
 import { KeystoreManager } from './keystore';
 import { PolicyEngine } from '../security/policy-engine';
+import { AmmClient } from '../integrations/amm-client';
 import {
   WalletConfig,
   WalletState,
@@ -30,6 +34,7 @@ import {
   SolanaCluster,
   TokenBalance,
   TransactionValidationParams,
+  PoolState,
 } from '../types';
 
 /** Memo Program v2 address. */
@@ -37,6 +42,16 @@ const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfc
 
 /** System Program address for policy validation. */
 const SYSTEM_PROGRAM_ADDRESS = '11111111111111111111111111111111';
+
+/** SentinelVault on-chain program (deployed on devnet). */
+const VAULT_PROGRAM_ID = new PublicKey('Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2');
+
+/** Anchor instruction discriminators (first 8 bytes of sha256("global:<name>")). */
+const VAULT_IX_DISCRIMINATOR = {
+  initializeVault: Buffer.from([48, 191, 163, 44, 71, 129, 63, 164]),
+  deposit:         Buffer.from([242, 35, 198, 137, 82, 225, 242, 182]),
+  withdraw:        Buffer.from([183, 18, 70, 156, 148, 109, 161, 34]),
+};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -396,6 +411,281 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   }
 
   /**
+   * Delegate SOL to a Solana validator via the native Stake Program.
+   * Creates a new stake account, funds it, and delegates to the given
+   * validator vote pubkey. Returns the stake account public key.
+   *
+   * @param validatorVotePubkey - Validator vote account address.
+   * @param amountSol           - Amount to delegate (in SOL, excludes rent).
+   */
+  async stakeSOL(validatorVotePubkey: string, amountSol: number): Promise<{ stakeAccountPubkey: string; signature: string }> {
+    this.assertReady();
+
+    if (amountSol <= 0) {
+      throw new Error(`Stake amount must be positive, got ${amountSol}`);
+    }
+
+    // Policy gate: validate Stake Program is allowlisted
+    this.enforcePolicy({
+      amountSol,
+      programId: 'Stake11111111111111111111111111111111111111',
+      type: 'stake',
+    });
+
+    const connection = this.connection!;
+    const votePubkey = new PublicKey(validatorVotePubkey);
+    const stakeAccount = Keypair.generate();
+
+    // Rent for a 200-byte stake account
+    const stakeRentExempt = await connection.getMinimumBalanceForRentExemption(200);
+    const lamports = Math.round(amountSol * LAMPORTS_PER_SOL) + stakeRentExempt;
+
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const createAccountIx = StakeProgram.createAccount({
+        fromPubkey: keypair.publicKey,
+        stakePubkey: stakeAccount.publicKey,
+        authorized: new Authorized(keypair.publicKey, keypair.publicKey),
+        lockup: new Lockup(0, 0, keypair.publicKey),
+        lamports,
+      });
+
+      const delegateIx = StakeProgram.delegate({
+        stakePubkey: stakeAccount.publicKey,
+        authorizedPubkey: keypair.publicKey,
+        votePubkey,
+      });
+
+      const transaction = new Transaction();
+      transaction.add(...createAccountIx.instructions);
+      transaction.add(...delegateIx.instructions);
+
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      transaction.feePayer = keypair.publicKey;
+      transaction.recentBlockhash = blockhash;
+
+      transaction.sign(keypair, stakeAccount);
+
+      const rawTx = transaction.serialize();
+      const signature = await connection.sendRawTransaction(rawTx, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+
+      this.emit('transaction:submitted', signature);
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+      this.emit('transaction:confirmed', signature);
+
+      // Record the spend in the policy engine
+      if (this.policyEngine) {
+        this.policyEngine.recordTransaction(amountSol);
+      }
+
+      return { stakeAccountPubkey: stakeAccount.publicKey.toBase58(), signature };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+      // Stake account keypair is ephemeral — wipe its secret key too
+      stakeAccount.secretKey.fill(0);
+    }
+  }
+
+  // ─── On-Chain Vault (Anchor Program) ──────────────────────────────────────
+
+  /**
+   * Derive the PDA address for a vault given the owner pubkey and an agent ID
+   * (32-byte buffer). Uses seeds: [b"vault", owner, agentId].
+   */
+  private deriveVaultPDA(ownerPubkey: PublicKey, agentId: Buffer): [PublicKey, number] {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from('vault'), ownerPubkey.toBuffer(), agentId],
+      VAULT_PROGRAM_ID,
+    );
+  }
+
+  /**
+   * Initialize an on-chain vault PDA for this agent and deposit SOL into it.
+   *
+   * This calls two instructions atomically:
+   *   1. `initialize_vault` — creates the PDA account
+   *   2. `deposit` — transfers `amountSol` into the vault
+   *
+   * @param agentId  32-byte agent identifier (padded with zeros if shorter)
+   * @param amountSol  Amount of SOL to deposit (minimum 0.0001)
+   * @returns  vault PDA address + transaction signature
+   */
+  async initializeAndDepositVault(
+    agentId: string,
+    amountSol: number,
+  ): Promise<{ vaultAddress: string; signature: string }> {
+    this.assertReady();
+    if (amountSol <= 0) throw new Error(`Deposit amount must be positive, got ${amountSol}`);
+
+    this.enforcePolicy({
+      amountSol,
+      programId: VAULT_PROGRAM_ID.toBase58(),
+      type: 'vault_deposit',
+    });
+
+    const connection = this.connection!;
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      // Pad agent ID to 32 bytes
+      const agentIdBuf = Buffer.alloc(32, 0);
+      Buffer.from(agentId, 'utf-8').copy(agentIdBuf, 0, 0, Math.min(agentId.length, 32));
+
+      const [vaultPDA] = this.deriveVaultPDA(keypair.publicKey, agentIdBuf);
+
+      // Build initialize_vault instruction
+      const initData = Buffer.concat([
+        VAULT_IX_DISCRIMINATOR.initializeVault,
+        agentIdBuf, // agent_id: [u8; 32]
+      ]);
+      const initIx = new TransactionInstruction({
+        programId: VAULT_PROGRAM_ID,
+        keys: [
+          { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+          { pubkey: vaultPDA, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: initData,
+      });
+
+      // Build deposit instruction
+      const lamports = BigInt(Math.round(amountSol * LAMPORTS_PER_SOL));
+      const depositData = Buffer.alloc(8 + 8 + 1);
+      VAULT_IX_DISCRIMINATOR.deposit.copy(depositData, 0);
+      depositData.writeBigUInt64LE(lamports, 8);
+      depositData.writeUInt8(0, 16); // reason_tag = 0 (manual)
+
+      const depositIx = new TransactionInstruction({
+        programId: VAULT_PROGRAM_ID,
+        keys: [
+          { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+          { pubkey: vaultPDA, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: depositData,
+      });
+
+      const transaction = new Transaction().add(initIx, depositIx);
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      transaction.feePayer = keypair.publicKey;
+      transaction.recentBlockhash = blockhash;
+      transaction.sign(keypair);
+
+      const rawTx = transaction.serialize();
+      const signature = await connection.sendRawTransaction(rawTx, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+
+      this.emit('transaction:submitted', signature);
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+      this.emit('transaction:confirmed', signature);
+
+      if (this.policyEngine) {
+        this.policyEngine.recordTransaction(amountSol);
+      }
+
+      return { vaultAddress: vaultPDA.toBase58(), signature };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Withdraw SOL from an on-chain vault back to this wallet.
+   *
+   * @param agentId   32-byte agent identifier (same as used during init)
+   * @param amountSol Amount of SOL to withdraw
+   * @returns transaction signature
+   */
+  async withdrawFromVault(agentId: string, amountSol: number): Promise<string> {
+    this.assertReady();
+    if (amountSol <= 0) throw new Error(`Withdraw amount must be positive, got ${amountSol}`);
+
+    const connection = this.connection!;
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const agentIdBuf = Buffer.alloc(32, 0);
+      Buffer.from(agentId, 'utf-8').copy(agentIdBuf, 0, 0, Math.min(agentId.length, 32));
+
+      const [vaultPDA] = this.deriveVaultPDA(keypair.publicKey, agentIdBuf);
+
+      const lamports = BigInt(Math.round(amountSol * LAMPORTS_PER_SOL));
+      const withdrawData = Buffer.alloc(8 + 8);
+      VAULT_IX_DISCRIMINATOR.withdraw.copy(withdrawData, 0);
+      withdrawData.writeBigUInt64LE(lamports, 8);
+
+      const withdrawIx = new TransactionInstruction({
+        programId: VAULT_PROGRAM_ID,
+        keys: [
+          { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+          { pubkey: vaultPDA, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: withdrawData,
+      });
+
+      const transaction = new Transaction().add(withdrawIx);
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      transaction.feePayer = keypair.publicKey;
+      transaction.recentBlockhash = blockhash;
+      transaction.sign(keypair);
+
+      const rawTx = transaction.serialize();
+      const signature = await connection.sendRawTransaction(rawTx, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+
+      this.emit('transaction:submitted', signature);
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+      this.emit('transaction:confirmed', signature);
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
    * Sign and broadcast a transaction. This is the critical path for all
    * on-chain interactions:
    *  1. Verify the wallet is ready and unlocked.
@@ -529,6 +819,339 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
     throw new Error(
       `Airdrop failed after ${AIRDROP_MAX_ATTEMPTS} attempts: ${lastError?.message ?? 'unknown error'}`,
     );
+  }
+
+  // ─── On-Chain AMM (Constant-Product Pool) ──────────────────────────────────
+
+  /**
+   * Create a constant-product AMM pool for a given token mint.
+   * The wallet owner becomes the pool authority.
+   *
+   * @param tokenMint - The SPL token mint address for the pool's token side.
+   * @param feeBps   - Fee in basis points (default: 30 = 0.3%).
+   * @returns Pool PDA address and transaction signature.
+   */
+  async createAmmPool(
+    tokenMint: string,
+    feeBps: number = 30,
+  ): Promise<{ poolAddress: string; signature: string }> {
+    this.assertReady();
+
+    this.enforcePolicy({
+      amountSol: 0,
+      programId: VAULT_PROGRAM_ID.toBase58(),
+      type: 'create_pool',
+    });
+
+    const ammClient = new AmmClient(this.connection!);
+    const mintPubkey = new PublicKey(tokenMint);
+
+    let keypair: Keypair | null = null;
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const [poolPDA] = ammClient.derivePoolPDA(keypair.publicKey, mintPubkey);
+      const ix = ammClient.buildCreatePoolIx(keypair.publicKey, mintPubkey, feeBps);
+
+      const transaction = new Transaction().add(ix);
+      const signature = await this.signAndSendTransaction(transaction);
+
+      return { poolAddress: poolPDA.toBase58(), signature };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Add liquidity to an AMM pool.
+   *
+   * @param tokenMint   - The token mint address.
+   * @param solAmount   - SOL amount in lamports.
+   * @param tokenAmount - Token amount in raw units.
+   * @returns Transaction signature.
+   */
+  async addLiquidity(
+    tokenMint: string,
+    solAmount: number,
+    tokenAmount: number,
+  ): Promise<string> {
+    this.assertReady();
+
+    this.enforcePolicy({
+      amountSol: solAmount / LAMPORTS_PER_SOL,
+      programId: VAULT_PROGRAM_ID.toBase58(),
+      type: 'add_liquidity',
+    });
+
+    const ammClient = new AmmClient(this.connection!);
+    const mintPubkey = new PublicKey(tokenMint);
+
+    let keypair: Keypair | null = null;
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const [poolPDA] = ammClient.derivePoolPDA(keypair.publicKey, mintPubkey);
+      const authorityATA = ammClient.deriveATA(keypair.publicKey, mintPubkey);
+      const poolATA = ammClient.deriveATA(poolPDA, mintPubkey);
+
+      const ix = ammClient.buildAddLiquidityIx(
+        keypair.publicKey,
+        poolPDA,
+        mintPubkey,
+        authorityATA,
+        poolATA,
+        solAmount,
+        tokenAmount,
+      );
+
+      const transaction = new Transaction().add(ix);
+      const signature = await this.signAndSendTransaction(transaction);
+
+      if (this.policyEngine) {
+        this.policyEngine.recordTransaction(solAmount / LAMPORTS_PER_SOL);
+      }
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Swap SOL for tokens on the AMM pool.
+   *
+   * @param tokenMint    - The token mint address.
+   * @param solIn        - SOL amount in lamports to swap.
+   * @param minTokenOut  - Minimum token output (slippage protection).
+   * @param poolAuthority - The pool authority's public key (for PDA derivation).
+   * @returns Transaction signature.
+   */
+  async swapSolForToken(
+    tokenMint: string,
+    solIn: number,
+    minTokenOut: number,
+    poolAuthority?: string,
+  ): Promise<string> {
+    this.assertReady();
+
+    this.enforcePolicy({
+      amountSol: solIn / LAMPORTS_PER_SOL,
+      programId: VAULT_PROGRAM_ID.toBase58(),
+      type: 'swap_sol_for_token',
+    });
+
+    const ammClient = new AmmClient(this.connection!);
+    const mintPubkey = new PublicKey(tokenMint);
+
+    let keypair: Keypair | null = null;
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const authority = poolAuthority
+        ? new PublicKey(poolAuthority)
+        : keypair.publicKey;
+      const [poolPDA] = ammClient.derivePoolPDA(authority, mintPubkey);
+      const poolATA = ammClient.deriveATA(poolPDA, mintPubkey);
+      const userATA = ammClient.deriveATA(keypair.publicKey, mintPubkey);
+
+      const ix = ammClient.buildSwapSolForTokenIx(
+        keypair.publicKey,
+        poolPDA,
+        mintPubkey,
+        poolATA,
+        userATA,
+        solIn,
+        minTokenOut,
+      );
+
+      const transaction = new Transaction().add(ix);
+      const signature = await this.signAndSendTransaction(transaction);
+
+      if (this.policyEngine) {
+        this.policyEngine.recordTransaction(solIn / LAMPORTS_PER_SOL);
+      }
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Swap tokens for SOL on the AMM pool.
+   *
+   * @param tokenMint    - The token mint address.
+   * @param tokenIn      - Token amount in raw units to swap.
+   * @param minSolOut    - Minimum SOL output in lamports (slippage protection).
+   * @param poolAuthority - The pool authority's public key (for PDA derivation).
+   * @returns Transaction signature.
+   */
+  async swapTokenForSol(
+    tokenMint: string,
+    tokenIn: number,
+    minSolOut: number,
+    poolAuthority?: string,
+  ): Promise<string> {
+    this.assertReady();
+
+    this.enforcePolicy({
+      amountSol: 0,
+      programId: VAULT_PROGRAM_ID.toBase58(),
+      type: 'swap_token_for_sol',
+    });
+
+    const ammClient = new AmmClient(this.connection!);
+    const mintPubkey = new PublicKey(tokenMint);
+
+    let keypair: Keypair | null = null;
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const authority = poolAuthority
+        ? new PublicKey(poolAuthority)
+        : keypair.publicKey;
+      const [poolPDA] = ammClient.derivePoolPDA(authority, mintPubkey);
+      const poolATA = ammClient.deriveATA(poolPDA, mintPubkey);
+      const userATA = ammClient.deriveATA(keypair.publicKey, mintPubkey);
+
+      const ix = ammClient.buildSwapTokenForSolIx(
+        keypair.publicKey,
+        poolPDA,
+        mintPubkey,
+        poolATA,
+        userATA,
+        tokenIn,
+        minSolOut,
+      );
+
+      const transaction = new Transaction().add(ix);
+      const signature = await this.signAndSendTransaction(transaction);
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Deposit SOL into an existing on-chain vault (deposit-only, no init).
+   * Use this when the vault PDA already exists.
+   *
+   * @param agentId   - 32-byte agent identifier.
+   * @param amountSol - Amount of SOL to deposit.
+   * @returns Transaction signature.
+   */
+  async depositToVault(agentId: string, amountSol: number): Promise<string> {
+    this.assertReady();
+    if (amountSol <= 0) throw new Error(`Deposit amount must be positive, got ${amountSol}`);
+
+    this.enforcePolicy({
+      amountSol,
+      programId: VAULT_PROGRAM_ID.toBase58(),
+      type: 'vault_deposit',
+    });
+
+    const connection = this.connection!;
+    let keypair: Keypair | null = null;
+
+    try {
+      keypair = this.keystoreManager.decryptKeypair(this.keystoreId!, this.password);
+
+      const agentIdBuf = Buffer.alloc(32, 0);
+      Buffer.from(agentId, 'utf-8').copy(agentIdBuf, 0, 0, Math.min(agentId.length, 32));
+
+      const [vaultPDA] = this.deriveVaultPDA(keypair.publicKey, agentIdBuf);
+
+      const lamports = BigInt(Math.round(amountSol * LAMPORTS_PER_SOL));
+      const depositData = Buffer.alloc(8 + 8 + 1);
+      VAULT_IX_DISCRIMINATOR.deposit.copy(depositData, 0);
+      depositData.writeBigUInt64LE(lamports, 8);
+      depositData.writeUInt8(0, 16); // reason_tag = 0 (manual)
+
+      const depositIx = new TransactionInstruction({
+        programId: VAULT_PROGRAM_ID,
+        keys: [
+          { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+          { pubkey: vaultPDA, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: depositData,
+      });
+
+      const transaction = new Transaction().add(depositIx);
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      transaction.feePayer = keypair.publicKey;
+      transaction.recentBlockhash = blockhash;
+      transaction.sign(keypair);
+
+      const rawTx = transaction.serialize();
+      const signature = await connection.sendRawTransaction(rawTx, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+
+      this.emit('transaction:submitted', signature);
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      this.state!.transactionCount += 1;
+      this.state!.lastActivity = Date.now();
+      this.emit('transaction:confirmed', signature);
+
+      if (this.policyEngine) {
+        this.policyEngine.recordTransaction(amountSol);
+      }
+
+      return signature;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit('transaction:failed', error);
+      throw error;
+    } finally {
+      if (keypair !== null) {
+        keypair.secretKey.fill(0);
+      }
+    }
+  }
+
+  /**
+   * Get the AMM pool state for a given token mint (pool created by this wallet).
+   *
+   * @param tokenMint - The token mint address.
+   * @returns Pool state or null if pool doesn't exist.
+   */
+  async getPoolState(tokenMint: string): Promise<PoolState | null> {
+    this.assertReady();
+
+    const ammClient = new AmmClient(this.connection!);
+    const mintPubkey = new PublicKey(tokenMint);
+    const ownerPubkey = new PublicKey(this.state!.publicKey);
+    const [poolPDA] = ammClient.derivePoolPDA(ownerPubkey, mintPubkey);
+
+    return ammClient.getPoolState(poolPDA);
   }
 
   // ── Lock / Unlock ───────────────────────────────────────────────────────────

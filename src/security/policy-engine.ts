@@ -264,6 +264,8 @@ export class PolicyEngine extends EventEmitter<PolicyEngineEvents> {
         'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',    // Associated Token Program
         'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',     // Memo Program v2
         'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',     // Jupiter V6 Aggregator
+        'Stake11111111111111111111111111111111111111',        // Native Stake Program
+        'Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2',     // SentinelVault On-Chain Program
       ],
       blockedAddresses:        [],
       requireSimulation:       true,

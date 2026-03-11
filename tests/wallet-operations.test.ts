@@ -36,6 +36,11 @@ const mockSendRawTransaction = jest.fn().mockResolvedValue(MOCK_SIGNATURE);
 const mockConfirmTransaction = jest.fn().mockResolvedValue({ value: {} });
 const mockRequestAirdrop = jest.fn().mockResolvedValue(MOCK_SIGNATURE);
 const mockGetParsedTokenAccountsByOwner = jest.fn().mockResolvedValue({ value: [] });
+const mockGetMinimumBalanceForRentExemption = jest.fn().mockResolvedValue(2282880); // ~0.00228 SOL for 200-byte stake account
+const mockGetVoteAccounts = jest.fn().mockResolvedValue({
+  current: [{ votePubkey: Keypair.generate().publicKey.toBase58() }],
+  delinquent: [],
+});
 
 jest.mock('@solana/web3.js', () => {
   const actual = jest.requireActual('@solana/web3.js');
@@ -48,6 +53,8 @@ jest.mock('@solana/web3.js', () => {
       confirmTransaction: mockConfirmTransaction,
       requestAirdrop: mockRequestAirdrop,
       getParsedTokenAccountsByOwner: mockGetParsedTokenAccountsByOwner,
+      getMinimumBalanceForRentExemption: mockGetMinimumBalanceForRentExemption,
+      getVoteAccounts: mockGetVoteAccounts,
     })),
   };
 });
@@ -570,6 +577,281 @@ describe('AgenticWallet — Transaction Operations', () => {
       // No setPolicyEngine called — should work normally
       const sig = await wallet.transferSOL(Keypair.generate().publicKey.toBase58(), 0.1);
       expect(sig).toBe(MOCK_SIGNATURE);
+    });
+  });
+
+  // ── AMM Operations ──────────────────────────────────────────────────────
+
+  describe('createAmmPool', () => {
+    it('constructs and sends a create_pool transaction', async () => {
+      const wallet = await createInitializedWallet();
+      const mintAddr = getMockMintAddress().toBase58();
+
+      const result = await wallet.createAmmPool(mintAddr, 30);
+
+      expect(result.poolAddress).toBeTruthy();
+      expect(result.signature).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('emits transaction:confirmed event', async () => {
+      const wallet = await createInitializedWallet();
+      const handler = jest.fn();
+      wallet.on('transaction:confirmed', handler);
+
+      await wallet.createAmmPool(getMockMintAddress().toBase58());
+
+      expect(handler).toHaveBeenCalledWith(MOCK_SIGNATURE);
+    });
+
+    it('enforces policy engine', async () => {
+      const { PolicyEngine } = require('../src/security/policy-engine');
+      const policyEngine = new PolicyEngine('test-agent', {
+        spendingLimits: { perTransaction: 1, hourly: 5, daily: 20, weekly: 100, monthly: 500 },
+        allowedPrograms: ['11111111111111111111111111111111'], // No vault program
+        blockedAddresses: [],
+        requireSimulation: false,
+        maxTransactionsPerMinute: 10,
+        maxTransactionsPerHour: 60,
+        maxTransactionsPerDay: 500,
+        alertThresholds: [],
+      });
+
+      const wallet = await createInitializedWallet();
+      wallet.setPolicyEngine(policyEngine);
+
+      await expect(
+        wallet.createAmmPool(getMockMintAddress().toBase58()),
+      ).rejects.toThrow('Policy violation');
+    });
+  });
+
+  describe('swapSolForToken', () => {
+    it('sends a swap transaction and returns signature', async () => {
+      const wallet = await createInitializedWallet();
+
+      const sig = await wallet.swapSolForToken(
+        getMockMintAddress().toBase58(),
+        10_000_000, // 0.01 SOL
+        0,
+      );
+
+      expect(sig).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('emits transaction:confirmed event', async () => {
+      const wallet = await createInitializedWallet();
+      const handler = jest.fn();
+      wallet.on('transaction:confirmed', handler);
+
+      await wallet.swapSolForToken(getMockMintAddress().toBase58(), 10_000_000, 0);
+
+      expect(handler).toHaveBeenCalledWith(MOCK_SIGNATURE);
+    });
+
+    it('enforces policy engine on swapSolForToken', async () => {
+      const { PolicyEngine } = require('../src/security/policy-engine');
+      const policyEngine = new PolicyEngine('test-agent', {
+        spendingLimits: { perTransaction: 0.005, hourly: 5, daily: 20, weekly: 100, monthly: 500 },
+        allowedPrograms: ['Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2'],
+        blockedAddresses: [],
+        requireSimulation: false,
+        maxTransactionsPerMinute: 10,
+        maxTransactionsPerHour: 60,
+        maxTransactionsPerDay: 500,
+        alertThresholds: [],
+      });
+
+      const wallet = await createInitializedWallet();
+      wallet.setPolicyEngine(policyEngine);
+
+      // 0.01 SOL exceeds 0.005 per-transaction limit
+      await expect(
+        wallet.swapSolForToken(getMockMintAddress().toBase58(), 10_000_000, 0),
+      ).rejects.toThrow('Policy violation');
+    });
+  });
+
+  describe('swapTokenForSol', () => {
+    it('sends a swap transaction and returns signature', async () => {
+      const wallet = await createInitializedWallet();
+
+      const sig = await wallet.swapTokenForSol(
+        getMockMintAddress().toBase58(),
+        50000,
+        0,
+      );
+
+      expect(sig).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('emits transaction:confirmed event', async () => {
+      const wallet = await createInitializedWallet();
+      const handler = jest.fn();
+      wallet.on('transaction:confirmed', handler);
+
+      await wallet.swapTokenForSol(getMockMintAddress().toBase58(), 50000, 0);
+
+      expect(handler).toHaveBeenCalledWith(MOCK_SIGNATURE);
+    });
+  });
+
+  describe('addLiquidity', () => {
+    it('sends an add_liquidity transaction and returns signature', async () => {
+      const wallet = await createInitializedWallet();
+
+      const sig = await wallet.addLiquidity(
+        getMockMintAddress().toBase58(),
+        500_000_000,  // 0.5 SOL
+        1_000_000_000, // 1B tokens
+      );
+
+      expect(sig).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+  });
+
+  describe('depositToVault', () => {
+    it('sends a deposit-only transaction (no init)', async () => {
+      const wallet = await createInitializedWallet();
+
+      const sig = await wallet.depositToVault('test-agent', 0.1);
+
+      expect(sig).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('throws on non-positive amount', async () => {
+      const wallet = await createInitializedWallet();
+
+      await expect(wallet.depositToVault('test-agent', 0)).rejects.toThrow('positive');
+    });
+
+    it('emits transaction:confirmed event', async () => {
+      const wallet = await createInitializedWallet();
+      const handler = jest.fn();
+      wallet.on('transaction:confirmed', handler);
+
+      await wallet.depositToVault('test-agent', 0.1);
+
+      expect(handler).toHaveBeenCalledWith(MOCK_SIGNATURE);
+    });
+
+    it('enforces policy engine', async () => {
+      const { PolicyEngine } = require('../src/security/policy-engine');
+      const policyEngine = new PolicyEngine('test-agent', {
+        spendingLimits: { perTransaction: 0.05, hourly: 5, daily: 20, weekly: 100, monthly: 500 },
+        allowedPrograms: ['Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2'],
+        blockedAddresses: [],
+        requireSimulation: false,
+        maxTransactionsPerMinute: 10,
+        maxTransactionsPerHour: 60,
+        maxTransactionsPerDay: 500,
+        alertThresholds: [],
+      });
+
+      const wallet = await createInitializedWallet();
+      wallet.setPolicyEngine(policyEngine);
+
+      // 0.1 SOL exceeds 0.05 per-transaction limit
+      await expect(
+        wallet.depositToVault('test-agent', 0.1),
+      ).rejects.toThrow('Policy violation');
+    });
+  });
+
+  // ── stakeSOL ─────────────────────────────────────────────────────────────
+
+  describe('stakeSOL', () => {
+    it('creates a stake account and delegates to a validator', async () => {
+      const wallet = await createInitializedWallet();
+      const validatorVote = Keypair.generate().publicKey.toBase58();
+
+      const result = await wallet.stakeSOL(validatorVote, 1);
+
+      expect(result.stakeAccountPubkey).toBeTruthy();
+      expect(result.signature).toBe(MOCK_SIGNATURE);
+      expect(mockSendRawTransaction).toHaveBeenCalledTimes(1);
+      expect(mockConfirmTransaction).toHaveBeenCalledWith(MOCK_SIGNATURE, 'confirmed');
+      expect(mockGetMinimumBalanceForRentExemption).toHaveBeenCalledWith(200);
+    });
+
+    it('emits transaction:confirmed on successful stake', async () => {
+      const wallet = await createInitializedWallet();
+      const confirmHandler = jest.fn();
+      wallet.on('transaction:confirmed', confirmHandler);
+
+      await wallet.stakeSOL(Keypair.generate().publicKey.toBase58(), 1);
+
+      expect(confirmHandler).toHaveBeenCalledWith(MOCK_SIGNATURE);
+    });
+
+    it('emits transaction:failed on staking error', async () => {
+      mockSendRawTransaction.mockRejectedValueOnce(new Error('insufficient funds for staking'));
+
+      const wallet = await createInitializedWallet();
+      const failHandler = jest.fn();
+      wallet.on('transaction:failed', failHandler);
+
+      await expect(
+        wallet.stakeSOL(Keypair.generate().publicKey.toBase58(), 1),
+      ).rejects.toThrow('insufficient funds for staking');
+
+      expect(failHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws on non-positive stake amount', async () => {
+      const wallet = await createInitializedWallet();
+
+      await expect(
+        wallet.stakeSOL(Keypair.generate().publicKey.toBase58(), 0),
+      ).rejects.toThrow('Stake amount must be positive');
+    });
+
+    it('enforces policy engine on stakeSOL', async () => {
+      const { PolicyEngine } = require('../src/security/policy-engine');
+      const policyEngine = new PolicyEngine('test-agent', {
+        spendingLimits: { perTransaction: 0.5, hourly: 5, daily: 20, weekly: 100, monthly: 500 },
+        allowedPrograms: ['Stake11111111111111111111111111111111111111'],
+        blockedAddresses: [],
+        requireSimulation: false,
+        maxTransactionsPerMinute: 10,
+        maxTransactionsPerHour: 60,
+        maxTransactionsPerDay: 500,
+        alertThresholds: [],
+      });
+
+      const wallet = await createInitializedWallet();
+      wallet.setPolicyEngine(policyEngine);
+
+      // 1 SOL exceeds per-transaction limit of 0.5
+      await expect(
+        wallet.stakeSOL(Keypair.generate().publicKey.toBase58(), 1),
+      ).rejects.toThrow('Policy violation');
+    });
+
+    it('records stake transaction in policy engine spending windows', async () => {
+      const { PolicyEngine } = require('../src/security/policy-engine');
+      const policyEngine = new PolicyEngine('test-agent', {
+        spendingLimits: { perTransaction: 5, hourly: 10, daily: 50, weekly: 200, monthly: 1000 },
+        allowedPrograms: ['Stake11111111111111111111111111111111111111'],
+        blockedAddresses: [],
+        requireSimulation: false,
+        maxTransactionsPerMinute: 10,
+        maxTransactionsPerHour: 60,
+        maxTransactionsPerDay: 500,
+        alertThresholds: [],
+      });
+
+      const wallet = await createInitializedWallet();
+      wallet.setPolicyEngine(policyEngine);
+
+      await wallet.stakeSOL(Keypair.generate().publicKey.toBase58(), 1);
+
+      const summary = policyEngine.getSpendingSummary();
+      expect(summary.hourly.amount).toBe(1);
     });
   });
 });

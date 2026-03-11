@@ -8,3 +8,4 @@ coverage/
 tests/.test-*/
 *.log
 .DS_Store
+target/

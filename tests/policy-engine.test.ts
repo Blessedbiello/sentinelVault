@@ -265,4 +265,91 @@ describe('PolicyEngine', () => {
     expect(Array.isArray(policy.alertThresholds)).toBe(true);
     expect(policy.alertThresholds.length).toBeGreaterThan(0);
   });
+
+  // ── 13. Default allowlist contains Stake Program ──────────────────────────────
+
+  it('should include the Native Stake Program in the default allowlist', () => {
+    const policy = PolicyEngine.createDefaultPolicy();
+    expect(policy.allowedPrograms).toContain('Stake11111111111111111111111111111111111111');
+  });
+
+  // ── 14. Default allowlist contains Jupiter V6 ─────────────────────────────────
+
+  it('should include Jupiter V6 Aggregator in the default allowlist', () => {
+    const policy = PolicyEngine.createDefaultPolicy();
+    expect(policy.allowedPrograms).toContain('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+  });
+
+  // ── 15. Circuit breaker auto-recovery after timeout ───────────────────────────
+
+  it('should auto-recover and allow transactions after CIRCUIT_BREAKER_RECOVERY_MS has elapsed', () => {
+    jest.useFakeTimers();
+
+    for (let i = 0; i < 5; i++) {
+      engine.recordFailure();
+    }
+
+    // Confirm blocked immediately after opening
+    const blocked = engine.validateTransaction({ amountSol: 0.1, programId: SYSTEM_PROGRAM_ID });
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.violation!.rule).toBe('circuit_breaker_open');
+
+    // Advance past the 60-second recovery window
+    jest.advanceTimersByTime(61 * 1000);
+
+    // The next validation should pass (auto-reset inside checkCircuitBreaker)
+    const recovered = engine.validateTransaction({ amountSol: 0.1, programId: SYSTEM_PROGRAM_ID });
+    expect(recovered.allowed).toBe(true);
+
+    jest.useRealTimers();
+  });
+
+  // ── 16. Weekly spending limit enforcement ─────────────────────────────────────
+
+  it('should block exactly at the weekly boundary (projected == limit + epsilon)', () => {
+    engine = new PolicyEngine('test-agent-001', createTestPolicy({
+      spendingLimits: { perTransaction: 10, hourly: 50, daily: 50, weekly: 10, monthly: 500 },
+    }));
+
+    // Record exactly at the limit
+    engine.recordTransaction(10);
+
+    // A 0.001 SOL transaction would project to 10.001 > 10 → blocked
+    const result = engine.validateTransaction({ amountSol: 0.001, programId: SYSTEM_PROGRAM_ID });
+    expect(result.allowed).toBe(false);
+    expect(result.violation!.rule).toBe('weekly_spending_limit_exceeded');
+  });
+
+  // ── 17. Hourly spending limit enforcement ─────────────────────────────────────
+
+  it('should block exactly at the hourly boundary (projected > limit)', () => {
+    // Hourly limit in createTestPolicy is 2 SOL
+    engine.recordTransaction(1.9);
+
+    // 1.9 + 0.2 = 2.1 > 2 → blocked
+    const result = engine.validateTransaction({ amountSol: 0.2, programId: SYSTEM_PROGRAM_ID });
+    expect(result.allowed).toBe(false);
+    expect(result.violation!.rule).toBe('hourly_spending_limit_exceeded');
+  });
+
+  // ── 18. getViolations accumulates across multiple rejections ──────────────────
+
+  it('should accumulate violations for every blocked transaction', () => {
+    // Exceed per-transaction limit twice
+    engine.validateTransaction({ amountSol: 5, programId: SYSTEM_PROGRAM_ID });
+    engine.validateTransaction({ amountSol: 5, programId: SYSTEM_PROGRAM_ID });
+
+    const violations = engine.getViolations();
+    expect(violations.length).toBe(2);
+    violations.forEach(v => expect(v.rule).toBe('per_transaction_limit_exceeded'));
+  });
+
+  // ── 19. updatePolicy merges spending limits without losing unmentioned fields ──
+
+  it('should merge spending limits when updatePolicy is called with partial limits', () => {
+    engine.updatePolicy({ spendingLimits: { perTransaction: 5 } } as any);
+    // The new per-transaction limit should be 5, but hourly (2) must be unchanged
+    const summary = engine.getSpendingSummary();
+    expect(summary.hourly.limit).toBe(2); // original hourly limit preserved
+  });
 });

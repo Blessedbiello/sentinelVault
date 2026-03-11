@@ -70,10 +70,16 @@ export type TransactionType =
   | 'transfer_sol'
   | 'transfer_spl'
   | 'swap'
+  | 'swap_sol_for_token'
+  | 'swap_token_for_sol'
+  | 'add_liquidity'
+  | 'create_pool'
   | 'stake'
   | 'unstake'
   | 'create_account'
   | 'close_account'
+  | 'vault_deposit'
+  | 'vault_withdraw'
   | 'custom';
 
 export type TransactionPriority = 'low' | 'medium' | 'high' | 'critical';
@@ -147,6 +153,15 @@ export interface ConfidenceCalibration {
   correctPredictions: number;
   accuracy: number;
 }
+
+export interface PendingOutcome {
+  decisionId: string;
+  action: string;
+  entryPrice: number;
+  confidence: number;
+  ticksRemaining: number;
+  decision: AgentDecision;
+}
 export type AgentStatus = 'idle' | 'analyzing' | 'executing' | 'paused' | 'error' | 'stopped';
 export type StrategyType = 'dca' | 'momentum' | 'mean_reversion' | 'grid_trading' | 'liquidity_provision';
 
@@ -172,6 +187,10 @@ export interface AgentState {
   lastDecision: AgentDecision | null;
   uptime: number;
   startedAt: number;
+  adaptiveWeights?: AdaptiveWeights;
+  marketRegime?: MarketRegime;
+  confidenceCalibration?: ConfidenceCalibration[];
+  recentDecisions?: AgentDecision[];
 }
 
 export interface AgentPerformance {
@@ -374,8 +393,9 @@ export interface CreateAgentParams {
 
 export interface PriceData {
   price: number;
-  source: 'jupiter' | 'coingecko' | 'simulated' | 'cache';
+  source: 'pyth' | 'jupiter' | 'coingecko' | 'simulated' | 'cache';
   timestamp: number;
+  confidence?: number;
 }
 
 export interface JupiterQuote {
@@ -386,6 +406,18 @@ export interface JupiterQuote {
   priceImpactPct: string;
   routePlan: { swapInfo: { label: string } }[];
   otherAmountThreshold: string;
+}
+
+// ─── AMM Pool Types ─────────────────────────────────────────────────────────
+
+export interface PoolState {
+  authority: string;
+  tokenMint: string;
+  poolTokenAccount: string;
+  solReserve: number;
+  tokenReserve: number;
+  feeBps: number;
+  bump: number;
 }
 
 // ─── Event Types ─────────────────────────────────────────────────────────────

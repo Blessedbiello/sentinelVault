@@ -14,12 +14,15 @@ export { AuditLogger } from './security/audit-logger';
 export { BaseAgent } from './agents/base-agent';
 export { TradingAgent } from './agents/trading-agent';
 export { LiquidityAgent } from './agents/liquidity-agent';
+export { ArbitrageAgent } from './agents/arbitrage-agent';
+export { PortfolioAgent } from './agents/portfolio-agent';
 export { AgentOrchestrator } from './agents/orchestrator';
 
 // Integrations
 export { PriceFeed } from './integrations/price-feed';
 export { JupiterClient } from './integrations/jupiter';
 export { AIAdvisor } from './integrations/ai-advisor';
+export { AmmClient } from './integrations/amm-client';
 
 // Dashboard
 export { DashboardServer } from './dashboard/server';

@@ -38,16 +38,20 @@ src/
     policy-engine.ts        # 8-layer security validation chain
     audit-logger.ts         # Structured audit log with risk scoring
   integrations/
-    price-feed.ts           # Real SOL/USD from Jupiter + CoinGecko
+    price-feed.ts           # Real SOL/USD from Pyth + Jupiter + CoinGecko
     jupiter.ts              # Jupiter V6 DEX quote/swap client
+    amm-client.ts           # TypeScript client for on-chain constant-product AMM
     ai-advisor.ts           # Optional LLM trade advisor (Claude/OpenAI)
   agents/
     base-agent.ts           # Abstract OODA loop base class
     trading-agent.ts        # DCA, momentum, mean reversion + real prices + AI
     liquidity-agent.ts      # Simulated LP pool management
+    arbitrage-agent.ts      # Cross-DEX arbitrage with oracle-vs-pool price comparison
+    portfolio-agent.ts      # Multi-asset portfolio rebalancing with drift detection
     orchestrator.ts         # Multi-agent lifecycle coordinator
   cli/index.ts              # Commander-based CLI
   dashboard/server.ts       # Express REST API + WebSocket push server
+programs/                    # Anchor on-chain programs (AMM, vault)
 tests/                      # Jest test files (*.test.ts)
 scripts/                    # Demo scripts (demo.ts, demo-multi-agent.ts, demo-trading.ts)
 .sentinelvault/             # Runtime data directory (keystores, audit logs)

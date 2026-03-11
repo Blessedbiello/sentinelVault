@@ -11,15 +11,18 @@ SentinelVault is an autonomous AI agent wallet framework for Solana. It provides
 
 - **Encrypted wallet management** -- Create, fund, lock/unlock Solana wallets with AES-256-GCM encrypted keystores. Private keys are decrypted on demand and wiped from memory immediately after use.
 - **SPL token operations** -- Create token mints, mint tokens, transfer tokens between agent wallets, and query token balances using `@solana/spl-token`.
-- **Protocol interaction (Memo Program)** -- Write on-chain memos via the Solana Memo Program v2, demonstrating dApp/protocol interaction beyond simple SOL transfers.
+- **Protocol interaction (Memo + Stake Program)** -- Write on-chain memos via the Solana Memo Program v2 and delegate SOL to validators via the native Stake Program, demonstrating dApp/protocol interaction beyond simple SOL transfers.
+- **On-chain constant-product AMM** -- Custom AMM program deployed on devnet (`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`) with `create_pool`, `add_liquidity`, `swap_sol_for_token`, and `swap_token_for_sol` instructions. Agents execute real on-chain swaps through the AMM pool, with automatic fallback to SOL transfers if no pool is configured or a swap fails.
 - **Agent-to-agent interaction** -- Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies.
-- **Real price feeds** -- SOL/USD from Jupiter Price API V2 with CoinGecko fallback. Cached for 30s. Graceful fallback to simulated prices when APIs are unreachable.
+- **Real price feeds** -- SOL/USD from Pyth Network oracle (via Hermes) with Jupiter Price API V2 and CoinGecko fallbacks. Pyth prices include confidence intervals. Cached for 30s. Graceful fallback to simulated prices when APIs are unreachable.
 - **Jupiter DEX quotes** -- Real Jupiter V6 swap quotes (SOL → USDC) showing route plan, price impact, and output amount. Demonstrates DEX awareness for mainnet readiness.
 - **Optional AI/LLM advisor** -- When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, blends LLM recommendations with quantitative signal (60/40 split). Graceful no-op when unavailable.
 - **Multi-factor AI decisions** -- TradingAgent uses a four-factor scoring system (trend, momentum, volatility, balance) with explainable reasoning chains.
 - **Autonomous agent orchestration** -- Spin up multiple independent AI agents, each with its own wallet, security policy, and trading strategy. An orchestrator manages lifecycle, health checks, and metrics aggregation.
 - **OODA decision loop** -- Every agent runs a continuous Observe-Orient-Decide-Act cycle. Concrete strategies (DCA, momentum, mean reversion, liquidity provision) are pluggable via abstract method overrides.
-- **8-layer security policy engine** -- All outbound transactions pass through a configurable chain of validation checks before reaching the network. Default allowlist includes System Program, SPL Token, AToken, and Memo v2.
+- **Native SOL staking** -- Agents can autonomously delegate idle SOL to validators via `wallet.stakeSOL()`, using the native Stake Program with proper rent-exempt account creation and delegation.
+- **On-chain vault program** -- Custom Anchor program deployed on devnet (`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`). PDA-based vaults with `initialize_vault`, `deposit`, and `withdraw` instructions. TypeScript client constructs raw Anchor instructions without `@coral-xyz/anchor` runtime dependency.
+- **8-layer security policy engine** -- All outbound transactions pass through a configurable chain of validation checks before reaching the network. Default allowlist includes System Program, SPL Token, AToken, Memo v2, Jupiter V6, Stake Program, and the SentinelVault on-chain program.
 - **Real-time dashboard** -- HTML dashboard + REST API + WebSocket push server for monitoring agent states, system metrics, audit logs, and alerts. Open http://localhost:3000 in a browser.
 - **Full audit trail** -- Every wallet operation, agent decision, security event, and transaction is logged with risk scores and queryable filters.
 - **CLI interface** -- Command-line tool for status checks, agent management, and wallet operations.
@@ -62,12 +65,47 @@ const tokens = await wallet.getTokenBalances();
 // Returns: TokenBalance[] with { mint, symbol, balance, decimals, uiBalance }
 ```
 
+### AMM pool operations
+
+```typescript
+import { AmmClient } from 'sentinel-vault';
+
+// Create an AMM pool for a token mint
+const { poolPda, signature } = await wallet.createAmmPool(tokenMintAddress);
+
+// Add liquidity to the pool
+await wallet.addLiquidity(tokenMintAddress, 0.5, 1000); // 0.5 SOL + 1000 tokens
+
+// Swap SOL for tokens through the AMM
+await wallet.swapSolForToken(tokenMintAddress, 0.1); // swap 0.1 SOL
+
+// Swap tokens for SOL through the AMM
+await wallet.swapTokenForSol(tokenMintAddress, 100); // swap 100 tokens
+
+// Query pool state (reserves, fee, price)
+const pool = await wallet.getPoolState(tokenMintAddress);
+// Returns: { solReserve, tokenReserve, feeRate, price }
+```
+
 ### On-chain memo (protocol interaction)
 
 ```typescript
 // Write a memo on-chain via Memo Program v2
 const sig = await wallet.sendMemo('Agent Alpha initialized — strategy: momentum');
 console.log('Explorer:', wallet.getExplorerUrl(sig));
+```
+
+### Native SOL staking
+
+```typescript
+// Delegate SOL to a validator via the native Stake Program
+const connection = wallet.getConnection();
+const { current } = await connection.getVoteAccounts();
+const validatorVote = current[0].votePubkey;
+
+const { stakeAccountPubkey, signature } = await wallet.stakeSOL(validatorVote, 1);
+console.log('Stake account:', stakeAccountPubkey);
+console.log('Explorer:', wallet.getExplorerUrl(signature));
 ```
 
 ### Agent-to-agent interaction
@@ -104,6 +142,9 @@ const agentId = await orchestrator.createAgent({
   },
 });
 
+// Wire AMM pool to all agents for real swap execution
+orchestrator.setPoolMintForAgents(tokenMintAddress);
+
 orchestrator.startAgent(agentId);
 ```
 
@@ -123,7 +164,7 @@ const result = engine.validateTransaction({ amountSol: 0.3 });
 // result.allowed === true
 ```
 
-### Real price feeds and Jupiter quotes
+### Real price feeds (Pyth + Jupiter) and DEX quotes
 
 ```typescript
 import { PriceFeed, JupiterClient, AIAdvisor } from 'sentinel-vault';
@@ -200,7 +241,7 @@ The WebSocket server runs on port 3001 by default. All messages are JSON with th
 The PolicyEngine validates every outbound transaction through an ordered chain that short-circuits on the first failure:
 
 1. **Circuit breaker** -- Blocks all transactions after 5 consecutive failures; auto-recovers after 60 seconds.
-2. **Program allowlist** -- Rejects transactions targeting programs not in the allowed set (default: System Program only).
+2. **Program allowlist** -- Rejects transactions targeting programs not in the allowed set (default: System, SPL Token, AToken, Memo v2, Jupiter V6, Stake).
 3. **Address blocklist** -- Rejects transactions to explicitly blocked destination addresses.
 4. **Per-transaction limit** -- Rejects any single transaction exceeding the configured SOL cap (default: 1 SOL).
 5. **Hourly spending limit** -- Rejects transactions that would push cumulative hourly spend over the threshold (default: 5 SOL).
@@ -224,7 +265,7 @@ Every agent extends `BaseAgent` and implements four abstract methods that form t
 1. **Observe** -- Gather market data, on-chain state, wallet balance. The TradingAgent uses a simulated price feed; the LiquidityAgent simulates pool state.
 2. **Analyze** -- Apply strategy logic to observations. Produces an `AgentDecision` with an action (`buy`, `sell`, `hold`, `rebalance`, `add_liquidity`, `remove_liquidity`), a confidence score (0-1), and reasoning text.
 3. **Confidence gate** -- If `confidence < 0.5` or action is `hold`, the decision is recorded but not executed.
-4. **Execute** -- Translate the decision into an on-chain transaction via the agent's `AgenticWallet`. Returns an `AgentAction` or null.
+4. **Execute** -- Translate the decision into an on-chain transaction via the agent's `AgenticWallet`. TradingAgent executes buy/sell swaps through the on-chain AMM when a pool is configured; ArbitrageAgent exploits oracle-vs-pool price discrepancies via AMM swaps; PortfolioAgent rebalances allocations via AMM swaps. All agents fall back to SOL transfers if no pool is available or a swap fails.
 5. **Evaluate** -- Update performance metrics (volume, win rate, PnL) and log the outcome.
 
 On error, the agent enters `error` status and auto-recovers after 5 seconds (unless explicitly stopped). The orchestrator's health monitor can also trigger recovery when `autoRestart` is enabled.
@@ -267,10 +308,10 @@ Orchestrator defaults (constructor config):
 
 | Type                  | Class             | Status         | Description                                      |
 |-----------------------|-------------------|----------------|--------------------------------------------------|
-| `trader`              | `TradingAgent`    | Implemented    | Autonomous trading with real/simulated prices + AI |
+| `trader`              | `TradingAgent`    | Implemented    | Autonomous trading with real/simulated prices, executes buy/sell swaps through the on-chain AMM |
 | `liquidity_provider`  | `LiquidityAgent`  | Implemented    | Simulated LP pool management and rebalancing      |
-| `arbitrageur`         | `ArbitrageAgent`  | Implemented    | Cross-DEX price monitoring with arbitrage intent recording |
-| `portfolio_manager`   | `PortfolioAgent`  | Implemented    | Multi-asset portfolio rebalancing with drift detection     |
+| `arbitrageur`         | `ArbitrageAgent`  | Implemented    | Oracle-vs-pool price arbitrage with real AMM swap execution |
+| `portfolio_manager`   | `PortfolioAgent`  | Implemented    | Multi-asset portfolio rebalancing via AMM swaps with drift detection |
 
 ### Trading Strategies
 
@@ -291,10 +332,9 @@ Each strategy accepts a `riskLevel` parameter: `conservative`, `moderate`, or `a
 ## Limitations and Constraints
 
 - **Devnet only** -- The framework is designed and tested for Solana devnet. Mainnet usage requires significant policy hardening and has not been validated.
-- **Simulated prices (fallback)** -- The TradingAgent uses real Jupiter/CoinGecko prices by default, but falls back to a local random-walk simulation when APIs are unreachable. The LiquidityAgent simulates pool state internally.
+- **Simulated prices (fallback)** -- The TradingAgent uses real Pyth/Jupiter/CoinGecko prices by default, but falls back to a local random-walk simulation when all APIs are unreachable. The LiquidityAgent simulates pool state internally.
 - **0.01 SOL trade cap** -- Each TradingAgent trade is hard-capped at 0.01 SOL (and never more than 10% of wallet balance) to protect devnet funds.
-- **No real DEX execution** -- Trades are SOL transfers to a target address, not actual swaps on a DEX (Jupiter quotes are fetched for transparency but execution is devnet SOL transfers). SPL token operations use real on-chain mint/transfer via `@solana/spl-token`.
-- **Arbitrageur and portfolio manager** -- ArbitrageAgent uses a simulated alternative DEX price (not a real second DEX). PortfolioAgent tracks target allocation but rebalancing is signaled via micro-transfers, not actual DEX swaps.
+- **AMM swap fallback** -- Agents execute real swaps through the on-chain constant-product AMM when a pool is configured via `orchestrator.setPoolMintForAgents()`. If no pool is configured or a swap transaction fails, agents fall back to SOL transfers to a target address. SPL token operations use real on-chain mint/transfer via `@solana/spl-token`.
 - **Single-process** -- All agents run in a single Node.js process. No distributed coordination or persistence across restarts.
 - **No mainnet safeguards** -- There is no multi-sig, hardware wallet integration, or human-in-the-loop approval workflow.
 - **Airdrop rate limits** -- Devnet airdrops are rate-limited by Solana. Sequential funding with 5-second delays is used, but failures are possible under load.

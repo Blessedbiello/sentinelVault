@@ -396,29 +396,43 @@
 
     // ── WebSocket ──────────────────────────────────────────────────────────
 
+    let reconnectDelay = 1000;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_DELAY = 30000;
+
     function connect() {
       const ws = new WebSocket('ws://' + location.hostname + ':3001');
 
       ws.onopen = () => {
+        reconnectDelay = 1000;
+        reconnectAttempts = 0;
         document.getElementById('ws-status').classList.add('connected');
         document.getElementById('ws-label').textContent = 'Connected';
         addActivity('system', 'WebSocket connected', '');
       };
 
       ws.onclose = () => {
+        reconnectAttempts++;
         document.getElementById('ws-status').classList.remove('connected');
-        document.getElementById('ws-label').textContent = 'Disconnected';
-        addActivity('system', 'WebSocket disconnected', 'Reconnecting in 3s...');
-        setTimeout(connect, 3000);
+        const jitter = Math.floor(Math.random() * 1000) - 500;
+        const delay = Math.min(reconnectDelay + jitter, MAX_RECONNECT_DELAY);
+        document.getElementById('ws-label').textContent = 'Reconnecting (attempt ' + reconnectAttempts + ')...';
+        addActivity('system', 'WebSocket disconnected', 'Reconnecting in ' + Math.round(delay / 1000) + 's (attempt ' + reconnectAttempts + ')...');
+        setTimeout(connect, delay);
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
       };
 
-      ws.onerror = () => {};
+      ws.onerror = (e) => {
+        addActivity('system', 'WebSocket error', 'Connection error occurred');
+      };
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
           handleMessage(msg);
-        } catch (e) {}
+        } catch (e) {
+          addActivity('system', 'WebSocket parse error', 'Failed to parse message');
+        }
       };
     }
 

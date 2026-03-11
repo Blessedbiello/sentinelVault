@@ -1,7 +1,13 @@
 import { AgentOrchestrator } from '../src/agents/orchestrator';
-import type { OrchestratorConfig, CreateAgentParams } from '../src/types';
+import type { OrchestratorConfig, CreateAgentParams, AlertEntry } from '../src/types';
 
 // ── Mock: AgenticWallet ─────────────────────────────────────────────────────
+
+const mockWalletOn = jest.fn();
+const mockRequestAirdrop = jest.fn().mockResolvedValue('mock-sig');
+const mockGetConnection = jest.fn().mockReturnValue({
+  getTransaction: jest.fn().mockResolvedValue(null),
+});
 
 jest.mock('../src/core/wallet', () => ({
   AgenticWallet: jest.fn().mockImplementation(() => ({
@@ -19,26 +25,25 @@ jest.mock('../src/core/wallet', () => ({
       transactionCount: 0,
       status: 'active',
     }),
-    requestAirdrop: jest.fn().mockResolvedValue('mock-sig'),
+    requestAirdrop: mockRequestAirdrop,
     setPolicyEngine: jest.fn(),
     getPolicyEngine: jest.fn().mockReturnValue(null),
-    on: jest.fn(),
+    getConnection: mockGetConnection,
+    on: mockWalletOn,
     emit: jest.fn(),
   })),
 }));
 
-// ── Mock: TradingAgent ──────────────────────────────────────────────────────
+// ── Shared mock agent factory ─────────────────────────────────────────────
 
-const mockTradingStop = jest.fn();
-
-jest.mock('../src/agents/trading-agent', () => ({
-  TradingAgent: jest.fn().mockImplementation((config: any) => ({
+function createMockAgent(config: any) {
+  return {
     getId: jest.fn().mockReturnValue(config.id),
     getName: jest.fn().mockReturnValue(config.name),
     getType: jest.fn().mockReturnValue(config.type),
     getStatus: jest.fn().mockReturnValue('idle'),
     start: jest.fn(),
-    stop: mockTradingStop,
+    stop: jest.fn(),
     pause: jest.fn(),
     resume: jest.fn(),
     getState: jest.fn().mockReturnValue({
@@ -91,74 +96,31 @@ jest.mock('../src/agents/trading-agent', () => ({
     getConfidenceCalibration: jest.fn().mockReturnValue([]),
     on: jest.fn(),
     emit: jest.fn(),
-  })),
+  };
+}
+
+// ── Mock: TradingAgent ──────────────────────────────────────────────────────
+
+jest.mock('../src/agents/trading-agent', () => ({
+  TradingAgent: jest.fn().mockImplementation((config: any) => createMockAgent(config)),
 }));
 
 // ── Mock: LiquidityAgent ────────────────────────────────────────────────────
 
-const mockLiquidityStop = jest.fn();
-
 jest.mock('../src/agents/liquidity-agent', () => ({
-  LiquidityAgent: jest.fn().mockImplementation((config: any) => ({
-    getId: jest.fn().mockReturnValue(config.id),
-    getName: jest.fn().mockReturnValue(config.name),
-    getType: jest.fn().mockReturnValue(config.type),
-    getStatus: jest.fn().mockReturnValue('idle'),
-    start: jest.fn(),
-    stop: mockLiquidityStop,
-    pause: jest.fn(),
-    resume: jest.fn(),
-    getState: jest.fn().mockReturnValue({
-      id: config.id,
-      name: config.name,
-      type: config.type,
-      status: 'idle',
-      wallet: {
-        id: 'mock-wallet-id',
-        label: 'Mock Wallet',
-        publicKey: 'MockPubKey1111111111111111111111111111111111',
-        cluster: 'devnet',
-        balanceSol: 1.0,
-        tokenBalances: [],
-        createdAt: Date.now(),
-        lastActivity: Date.now(),
-        transactionCount: 0,
-        status: 'active',
-      },
-      performance: {
-        totalTransactions: 0,
-        successfulTransactions: 0,
-        failedTransactions: 0,
-        totalVolumeSol: 0,
-        totalFeePaid: 0,
-        profitLoss: 0,
-        winRate: 0,
-        averageExecutionTime: 0,
-      },
-      currentStrategy: config.strategy.name,
-      activeActions: [],
-      lastDecision: null,
-      uptime: 0,
-      startedAt: 0,
-    }),
-    getPerformance: jest.fn().mockReturnValue({
-      totalTransactions: 0,
-      successfulTransactions: 0,
-      failedTransactions: 0,
-      totalVolumeSol: 0,
-      totalFeePaid: 0,
-      profitLoss: 0,
-      winRate: 0,
-      averageExecutionTime: 0,
-    }),
-    setPolicyEngine: jest.fn(),
-    getDecisionHistory: jest.fn().mockReturnValue([]),
-    getAdaptiveWeights: jest.fn().mockReturnValue({ trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 }),
-    getMarketRegime: jest.fn().mockReturnValue('quiet'),
-    getConfidenceCalibration: jest.fn().mockReturnValue([]),
-    on: jest.fn(),
-    emit: jest.fn(),
-  })),
+  LiquidityAgent: jest.fn().mockImplementation((config: any) => createMockAgent(config)),
+}));
+
+// ── Mock: ArbitrageAgent ────────────────────────────────────────────────────
+
+jest.mock('../src/agents/arbitrage-agent', () => ({
+  ArbitrageAgent: jest.fn().mockImplementation((config: any) => createMockAgent(config)),
+}));
+
+// ── Mock: PortfolioAgent ────────────────────────────────────────────────────
+
+jest.mock('../src/agents/portfolio-agent', () => ({
+  PortfolioAgent: jest.fn().mockImplementation((config: any) => createMockAgent(config)),
 }));
 
 // ── Mock: PolicyEngine ──────────────────────────────────────────────────────
@@ -171,7 +133,6 @@ jest.mock('../src/security/policy-engine', () => ({
     on: jest.fn(),
     emit: jest.fn(),
   })),
-  // Attach createDefaultPolicy as a static method on the mock constructor
   ...((): Record<string, unknown> => {
     const ctor = jest.fn().mockImplementation(() => ({
       validateTransaction: jest.fn().mockReturnValue({ allowed: true }),
@@ -203,13 +164,16 @@ jest.mock('../src/security/policy-engine', () => ({
 // ── Mock: AuditLogger ───────────────────────────────────────────────────────
 
 const mockAuditClose = jest.fn();
+const mockLogAgentDecision = jest.fn();
+const mockLogSecurityEvent = jest.fn();
+const mockLogTransaction = jest.fn();
 
 jest.mock('../src/security/audit-logger', () => ({
   AuditLogger: jest.fn().mockImplementation(() => ({
     logWalletOperation: jest.fn(),
-    logTransaction: jest.fn(),
-    logSecurityEvent: jest.fn(),
-    logAgentDecision: jest.fn(),
+    logTransaction: mockLogTransaction,
+    logSecurityEvent: mockLogSecurityEvent,
+    logAgentDecision: mockLogAgentDecision,
     logSystemEvent: jest.fn(),
     getRecentEntries: jest.fn().mockReturnValue([]),
     getRiskSummary: jest.fn().mockReturnValue({
@@ -227,7 +191,7 @@ jest.mock('../src/security/audit-logger', () => ({
 
 function makeOrchestratorConfig(overrides: Partial<OrchestratorConfig> = {}): OrchestratorConfig {
   return {
-    maxAgents: 5,
+    maxAgents: 10,
     healthCheckIntervalMs: 60_000,
     metricsIntervalMs: 60_000,
     autoRestart: false,
@@ -255,6 +219,16 @@ function makeCreateAgentParams(overrides: Partial<CreateAgentParams> = {}): Crea
   };
 }
 
+function getLastCreatedMockAgent(mockCtor: jest.Mock): any {
+  const results = mockCtor.mock.results;
+  return results[results.length - 1]?.value;
+}
+
+function getEventCallback(mockOn: jest.Mock, eventName: string): ((...args: any[]) => void) | undefined {
+  const call = mockOn.mock.calls.find(([name]: [string]) => name === eventName);
+  return call ? call[1] : undefined;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('AgentOrchestrator', () => {
@@ -265,10 +239,11 @@ describe('AgentOrchestrator', () => {
     jest.clearAllMocks();
   });
 
+  // ── Agent Factory ─────────────────────────────────────────────────────────
+
   test('createAgent creates an agent and returns a valid ID string', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
     const id = await orchestrator.createAgent(makeCreateAgentParams());
-
     expect(typeof id).toBe('string');
     expect(id.length).toBeGreaterThan(0);
   });
@@ -276,79 +251,426 @@ describe('AgentOrchestrator', () => {
   test('createAgent with trader type creates a TradingAgent', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
     const id = await orchestrator.createAgent(makeCreateAgentParams({ type: 'trader' }));
-
-    expect(typeof id).toBe('string');
+    const { TradingAgent } = require('../src/agents/trading-agent');
+    expect(TradingAgent).toHaveBeenCalled();
     expect(id.length).toBeGreaterThan(0);
   });
 
   test('createAgent with liquidity_provider type creates a LiquidityAgent', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
-    const id = await orchestrator.createAgent(
-      makeCreateAgentParams({ type: 'liquidity_provider', name: 'LP Agent' }),
-    );
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'liquidity_provider', name: 'LP' }));
+    const { LiquidityAgent } = require('../src/agents/liquidity-agent');
+    expect(LiquidityAgent).toHaveBeenCalled();
+  });
 
-    expect(typeof id).toBe('string');
-    expect(id.length).toBeGreaterThan(0);
+  test('createAgent with arbitrageur type creates an ArbitrageAgent', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'arbitrageur', name: 'Arb' }));
+    const { ArbitrageAgent } = require('../src/agents/arbitrage-agent');
+    expect(ArbitrageAgent).toHaveBeenCalled();
+  });
+
+  test('createAgent with portfolio_manager type creates a PortfolioAgent', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'portfolio_manager', name: 'PM' }));
+    const { PortfolioAgent } = require('../src/agents/portfolio-agent');
+    expect(PortfolioAgent).toHaveBeenCalled();
   });
 
   test('cannot exceed maxAgents limit', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig({ maxAgents: 2 }));
-
     await orchestrator.createAgent(makeCreateAgentParams({ name: 'Agent 1' }));
     await orchestrator.createAgent(makeCreateAgentParams({ name: 'Agent 2' }));
-
     await expect(
       orchestrator.createAgent(makeCreateAgentParams({ name: 'Agent 3' })),
     ).rejects.toThrow();
   });
 
+  // ── Lifecycle Management ─────────────────────────────────────────────────
+
+  test('startAgent calls agent.start() and emits agent:started', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const emitSpy = jest.fn();
+    orchestrator.on('agent:started', emitSpy);
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+
+    orchestrator.startAgent(id);
+    expect(agent.start).toHaveBeenCalled();
+    expect(emitSpy).toHaveBeenCalledWith(id);
+  });
+
+  test('startAgent throws for invalid ID', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    expect(() => orchestrator.startAgent('nonexistent')).toThrow('Agent not found');
+  });
+
+  test('stopAgent calls agent.stop() and emits agent:stopped', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const emitSpy = jest.fn();
+    orchestrator.on('agent:stopped', emitSpy);
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+
+    orchestrator.stopAgent(id);
+    expect(agent.stop).toHaveBeenCalled();
+    expect(emitSpy).toHaveBeenCalledWith(id);
+  });
+
+  test('stopAgent throws for invalid ID', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    expect(() => orchestrator.stopAgent('nonexistent')).toThrow('Agent not found');
+  });
+
+  test('pauseAgent calls agent.pause()', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+
+    orchestrator.pauseAgent(id);
+    expect(agent.pause).toHaveBeenCalled();
+  });
+
+  test('pauseAgent throws for invalid ID', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    expect(() => orchestrator.pauseAgent('nonexistent')).toThrow('Agent not found');
+  });
+
+  test('resumeAgent calls agent.resume()', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+
+    orchestrator.resumeAgent(id);
+    expect(agent.resume).toHaveBeenCalled();
+  });
+
+  test('resumeAgent throws for invalid ID', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    expect(() => orchestrator.resumeAgent('nonexistent')).toThrow('Agent not found');
+  });
+
   test('removeAgent removes the agent and getAgentCount decreases', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
     const id = await orchestrator.createAgent(makeCreateAgentParams());
-
     expect(orchestrator.getAgentCount()).toBe(1);
-
-    await orchestrator.removeAgent(id);
-
+    orchestrator.removeAgent(id);
     expect(orchestrator.getAgentCount()).toBe(0);
+  });
+
+  // ── Batch Operations ─────────────────────────────────────────────────────
+
+  test('startAll starts all registered agents', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id1 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A1' }));
+    const id2 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A2' }));
+
+    orchestrator.startAll();
+
+    expect(orchestrator.getAgent(id1)!.start).toHaveBeenCalled();
+    expect(orchestrator.getAgent(id2)!.start).toHaveBeenCalled();
+  });
+
+  test('stopAll stops all registered agents', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id1 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A1' }));
+    const id2 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A2' }));
+
+    orchestrator.stopAll();
+
+    expect(orchestrator.getAgent(id1)!.stop).toHaveBeenCalled();
+    expect(orchestrator.getAgent(id2)!.stop).toHaveBeenCalled();
+  });
+
+  // ── Funding ──────────────────────────────────────────────────────────────
+
+  test('fundAllAgents calls requestAirdrop for each agent', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams({ name: 'A1' }));
+    await orchestrator.createAgent(makeCreateAgentParams({ name: 'A2' }));
+
+    await orchestrator.fundAllAgents(2);
+
+    expect(mockRequestAirdrop).toHaveBeenCalledTimes(2);
+    expect(mockRequestAirdrop).toHaveBeenCalledWith(2);
+  });
+
+  test('fundAllAgents handles airdrop failure without throwing', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams({ name: 'A1' }));
+    mockRequestAirdrop.mockRejectedValueOnce(new Error('rate limited'));
+
+    await expect(orchestrator.fundAllAgents()).resolves.toBeUndefined();
+    // Alert should have been created
+    const alerts = orchestrator.getAlerts();
+    expect(alerts.some(a => a.message.includes('Airdrop failed'))).toBe(true);
+  });
+
+  test('fundAllAgents passes custom amount', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams({ name: 'A1' }));
+
+    await orchestrator.fundAllAgents(5);
+
+    expect(mockRequestAirdrop).toHaveBeenCalledWith(5);
+  });
+
+  // ── Health Monitoring ────────────────────────────────────────────────────
+
+  test('startHealthMonitoring is idempotent', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig({ healthCheckIntervalMs: 100_000, metricsIntervalMs: 100_000 }));
+    orchestrator.startHealthMonitoring();
+    orchestrator.startHealthMonitoring(); // second call is no-op
+    orchestrator.stopHealthMonitoring();
+  });
+
+  test('stopHealthMonitoring clears intervals', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig({ healthCheckIntervalMs: 100_000, metricsIntervalMs: 100_000 }));
+    orchestrator.startHealthMonitoring();
+    orchestrator.stopHealthMonitoring();
+    // No errors, intervals cleared
+  });
+
+  test('health check with autoRestart=true resumes errored agents', async () => {
+    jest.useFakeTimers();
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig({
+      autoRestart: true,
+      healthCheckIntervalMs: 100,
+      metricsIntervalMs: 100_000,
+    }));
+
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+    (agent.getStatus as jest.Mock).mockReturnValue('error');
+
+    orchestrator.startHealthMonitoring();
+    jest.advanceTimersByTime(150);
+
+    expect(agent.resume).toHaveBeenCalled();
+
+    orchestrator.stopHealthMonitoring();
+    jest.useRealTimers();
+  });
+
+  test('health check with autoRestart=true handles resume failure with critical alert', async () => {
+    jest.useFakeTimers();
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig({
+      autoRestart: true,
+      healthCheckIntervalMs: 100,
+      metricsIntervalMs: 100_000,
+    }));
+
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+    (agent.getStatus as jest.Mock).mockReturnValue('error');
+    (agent.resume as jest.Mock).mockImplementation(() => { throw new Error('cannot resume'); });
+
+    orchestrator.startHealthMonitoring();
+    jest.advanceTimersByTime(150);
+
+    const alerts = orchestrator.getAlerts();
+    expect(alerts.some(a => a.severity === 'critical' && a.message.includes('could not be recovered'))).toBe(true);
+
+    orchestrator.stopHealthMonitoring();
+    jest.useRealTimers();
+  });
+
+  test('health check with autoRestart=false creates warning alert only', async () => {
+    jest.useFakeTimers();
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig({
+      autoRestart: false,
+      healthCheckIntervalMs: 100,
+      metricsIntervalMs: 100_000,
+    }));
+
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id)!;
+    (agent.getStatus as jest.Mock).mockReturnValue('error');
+
+    orchestrator.startHealthMonitoring();
+    jest.advanceTimersByTime(150);
+
+    const alerts = orchestrator.getAlerts();
+    expect(alerts.some(a => a.severity === 'warning' && a.message.includes('Auto-restart is disabled'))).toBe(true);
+    expect(agent.resume).not.toHaveBeenCalled();
+
+    orchestrator.stopHealthMonitoring();
+    jest.useRealTimers();
+  });
+
+  // ── Alert System ──────────────────────────────────────────────────────────
+
+  test('addAlert creates alert with correct shape', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    orchestrator.addAlert('warning', 'test alert', 'agent-123');
+
+    const alerts = orchestrator.getAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveProperty('id');
+    expect(alerts[0].severity).toBe('warning');
+    expect(alerts[0].message).toBe('test alert');
+    expect(alerts[0].agentId).toBe('agent-123');
+    expect(alerts[0].acknowledged).toBe(false);
+  });
+
+  test('addAlert emits alert event', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const alertHandler = jest.fn();
+    orchestrator.on('alert', alertHandler);
+
+    orchestrator.addAlert('info', 'test');
+    expect(alertHandler).toHaveBeenCalledTimes(1);
+    expect(alertHandler).toHaveBeenCalledWith(expect.objectContaining({ severity: 'info', message: 'test' }));
+  });
+
+  test('alerts cap at 1000', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    for (let i = 0; i < 1010; i++) {
+      orchestrator.addAlert('info', `alert-${i}`);
+    }
+    expect(orchestrator.getAlerts().length).toBeLessThanOrEqual(1000);
+  });
+
+  // ── State & Accessors ─────────────────────────────────────────────────────
+
+  test('getDashboardState returns correct shape', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams());
+
+    const state = orchestrator.getDashboardState();
+    expect(state).toHaveProperty('agents');
+    expect(state).toHaveProperty('systemMetrics');
+    expect(state).toHaveProperty('recentTransactions');
+    expect(state).toHaveProperty('recentAuditEntries');
+    expect(state).toHaveProperty('alerts');
+    expect(state.agents).toHaveLength(1);
   });
 
   test('getSystemMetrics returns correct totalAgents count', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
-
-    await orchestrator.createAgent(makeCreateAgentParams({ name: 'Agent A' }));
-    await orchestrator.createAgent(makeCreateAgentParams({ name: 'Agent B' }));
-
+    await orchestrator.createAgent(makeCreateAgentParams({ name: 'A' }));
+    await orchestrator.createAgent(makeCreateAgentParams({ name: 'B' }));
     const metrics = orchestrator.getSystemMetrics();
-
     expect(metrics.totalAgents).toBe(2);
   });
 
-  test('getAgentStates returns array of agent states', async () => {
+  test('getAgentStates returns array with adaptive fields', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
-
-    await orchestrator.createAgent(makeCreateAgentParams({ name: 'Agent X' }));
-
+    await orchestrator.createAgent(makeCreateAgentParams());
     const states = orchestrator.getAgentStates();
-
-    expect(Array.isArray(states)).toBe(true);
-    expect(states.length).toBe(1);
-    expect(states[0]).toHaveProperty('id');
-    expect(states[0]).toHaveProperty('status');
+    expect(states).toHaveLength(1);
+    expect(states[0]).toHaveProperty('adaptiveWeights');
+    expect(states[0]).toHaveProperty('marketRegime');
+    expect(states[0]).toHaveProperty('confidenceCalibration');
+    expect(states[0]).toHaveProperty('recentDecisions');
   });
+
+  test('getAgent returns agent for valid ID', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const agent = orchestrator.getAgent(id);
+    expect(agent).toBeDefined();
+    expect(agent!.getId()).toBe(id);
+  });
+
+  test('getAgent returns undefined for invalid ID', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    expect(orchestrator.getAgent('nonexistent')).toBeUndefined();
+  });
+
+  test('getAgentWallet returns wallet, throws for invalid', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const wallet = orchestrator.getAgentWallet(id);
+    expect(wallet).toBeDefined();
+    expect(() => orchestrator.getAgentWallet('nonexistent')).toThrow('Agent not found');
+  });
+
+  test('getAgentWalletAddresses returns Map with correct entries', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const id = await orchestrator.createAgent(makeCreateAgentParams());
+    const addresses = orchestrator.getAgentWalletAddresses();
+    expect(addresses.size).toBe(1);
+    expect(addresses.has(id)).toBe(true);
+    expect(addresses.get(id)).toBe('MockPubKey1111111111111111111111111111111111');
+  });
+
+  test('getAuditLogger returns the logger', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    const logger = orchestrator.getAuditLogger();
+    expect(logger).toBeDefined();
+    expect(typeof logger.logSystemEvent).toBe('function');
+  });
+
+  // ── Event Wiring ─────────────────────────────────────────────────────────
+
+  test('wireAgentEvents: agent:decision triggers auditLogger.logAgentDecision', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams());
+
+    const { TradingAgent } = require('../src/agents/trading-agent');
+    const mockAgent = getLastCreatedMockAgent(TradingAgent);
+    const decisionCb = getEventCallback(mockAgent.on, 'agent:decision');
+    expect(decisionCb).toBeDefined();
+
+    const mockDecision = {
+      id: 'dec-1',
+      action: 'buy',
+      confidence: 0.8,
+      reasoning: 'test',
+      executed: true,
+      marketConditions: {},
+    };
+    decisionCb!(mockDecision);
+
+    expect(mockLogAgentDecision).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      'buy',
+      expect.objectContaining({ decisionId: 'dec-1' }),
+    );
+  });
+
+  test('wireAgentEvents: agent:error triggers alert with warning severity', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams());
+
+    const { TradingAgent } = require('../src/agents/trading-agent');
+    const mockAgent = getLastCreatedMockAgent(TradingAgent);
+    const errorCb = getEventCallback(mockAgent.on, 'agent:error');
+    expect(errorCb).toBeDefined();
+
+    errorCb!(new Error('test error'));
+
+    const alerts = orchestrator.getAlerts();
+    expect(alerts.some(a => a.severity === 'warning' && a.message.includes('test error'))).toBe(true);
+  });
+
+  test('wireAgentEvents: transaction:confirmed pushes to recentTransactions', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+    await orchestrator.createAgent(makeCreateAgentParams());
+
+    // Get the wallet on callback for transaction:confirmed
+    const txCb = getEventCallback(mockWalletOn, 'transaction:confirmed');
+    expect(txCb).toBeDefined();
+
+    txCb!('mock-sig-123');
+
+    const dashboard = orchestrator.getDashboardState();
+    expect(dashboard.recentTransactions.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── Shutdown ─────────────────────────────────────────────────────────────
 
   test('shutdown stops all agents and closes the audit logger', async () => {
     orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
-
-    await orchestrator.createAgent(makeCreateAgentParams({ name: 'Trader 1' }));
-    await orchestrator.createAgent(
-      makeCreateAgentParams({ name: 'LP 1', type: 'liquidity_provider' }),
-    );
+    const id1 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1' }));
+    const id2 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'LP1', type: 'liquidity_provider' }));
 
     await orchestrator.shutdown();
 
-    expect(mockTradingStop).toHaveBeenCalled();
-    expect(mockLiquidityStop).toHaveBeenCalled();
+    expect(orchestrator.getAgent(id1)!.stop).toHaveBeenCalled();
+    expect(orchestrator.getAgent(id2)!.stop).toHaveBeenCalled();
     expect(mockAuditClose).toHaveBeenCalled();
   });
 });

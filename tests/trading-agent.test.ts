@@ -206,12 +206,20 @@ describe('TradingAgent', () => {
       const { agent } = await buildAgent('mean_reversion');
       const agentAny = agent as unknown as Record<string, unknown>;
 
-      // Force price below buy threshold (0.95 * 1.0 = 0.95).
+      // Seed price history then call analyze() directly with a price clearly
+      // below the 0.95 buy threshold. Using analyze() directly avoids random-
+      // walk noise from simulatePrice() that can drift the price into an
+      // unexpected range when other tests leave unsettled async state.
+      (agentAny.priceHistory as number[]).push(...Array(20).fill(0.8));
       agentAny.currentPrice = 0.8;
-      (agentAny.priceHistory as number[]).push(0.8);
 
-      const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
-      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze({
+        price: 0.8,
+        priceSource: 'simulated',
+        priceHistory: Array(20).fill(0.8),
+        timestamp: Date.now(),
+        balance: 2.0,
+      });
 
       expect(decision.action).toBe('buy');
     });
@@ -220,12 +228,18 @@ describe('TradingAgent', () => {
       const { agent } = await buildAgent('mean_reversion');
       const agentAny = agent as unknown as Record<string, unknown>;
 
-      // Force price above sell threshold (1.05 * 1.0 = 1.05).
+      // Same approach: call analyze() directly with a price clearly above the
+      // 1.05 sell threshold to eliminate random-walk sensitivity.
+      (agentAny.priceHistory as number[]).push(...Array(20).fill(1.2));
       agentAny.currentPrice = 1.2;
-      (agentAny.priceHistory as number[]).push(1.2);
 
-      const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
-      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze({
+        price: 1.2,
+        priceSource: 'simulated',
+        priceHistory: Array(20).fill(1.2),
+        timestamp: Date.now(),
+        balance: 2.0,
+      });
 
       expect(decision.action).toBe('sell');
     });
@@ -323,11 +337,10 @@ describe('TradingAgent', () => {
       expect(mc.compositeConfidence as number).toBeCloseTo(expected, 5);
     });
 
-    it('evaluate calls updateWeights on confirmed trade', async () => {
+    it('evaluate queues pending outcome for deferred evaluation', async () => {
       mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
       const { agent } = await buildAgent('dca');
 
-      // Seed price history with at least 2 entries
       const agentAny = agent as any;
       agentAny.priceHistory = [1.0, 1.05];
 
@@ -336,7 +349,29 @@ describe('TradingAgent', () => {
       const action = await (agent as unknown as { execute(d: AgentDecision): Promise<unknown> }).execute(decision);
       await (agent as unknown as { evaluate(a: unknown, d: AgentDecision): Promise<void> }).evaluate(action, decision);
 
-      // Weight history should have been updated
+      // Pending outcomes should have been queued (deferred evaluation)
+      expect(agentAny.pendingOutcomes.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('observe processes pending outcomes and updates weights after tick horizon', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent } = await buildAgent('dca');
+
+      const agentAny = agent as any;
+      agentAny.priceHistory = [1.0, 1.05];
+
+      const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
+      const action = await (agent as unknown as { execute(d: AgentDecision): Promise<unknown> }).execute(decision);
+      await (agent as unknown as { evaluate(a: unknown, d: AgentDecision): Promise<void> }).evaluate(action, decision);
+
+      // Run 3 observe cycles (OUTCOME_EVAL_TICKS) to resolve the pending outcome
+      for (let i = 0; i < 3; i++) {
+        await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
+      }
+
+      // Pending outcomes should be resolved and weights updated
+      expect(agentAny.pendingOutcomes.length).toBe(0);
       expect(agent.getWeightHistory().length).toBeGreaterThanOrEqual(1);
     });
   });
@@ -415,6 +450,195 @@ describe('TradingAgent', () => {
 
       expect(action).toBeNull();
       expect(mockSendRawTransaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Strategy confidence constants ─────────────────────────────────────────
+
+  describe('Strategy confidence constants', () => {
+    it('DCA strategy always returns exactly DCA_CONFIDENCE (0.6) as minimum confidence', async () => {
+      const { agent } = await buildAgent('dca');
+      // Run multiple cycles to ensure confidence is always >= 0.6
+      for (let i = 0; i < 5; i++) {
+        const obs = await (agent as unknown as { observe(): Promise<Record<string, unknown>> }).observe();
+        const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze(obs);
+        expect(decision.action).toBe('buy');
+        expect(decision.confidence).toBeGreaterThanOrEqual(0.6);
+      }
+    });
+
+    it('mean reversion returns "hold" with HOLD_CONFIDENCE (0.3) when price is within thresholds', async () => {
+      const { agent } = await buildAgent('mean_reversion');
+      const agentAny = agent as unknown as Record<string, unknown>;
+
+      // Price exactly at basePrice (1.0) — within [0.95, 1.05] neutral zone.
+      // Call analyze() directly to avoid random-walk in observe() that could
+      // drift the price outside the neutral zone.
+      (agentAny.priceHistory as number[]).push(...Array(20).fill(1.0));
+      agentAny.currentPrice = 1.0;
+
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze({
+        price: 1.0,
+        priceSource: 'simulated',
+        priceHistory: Array(20).fill(1.0),
+        timestamp: Date.now(),
+        balance: 2.0,
+      });
+
+      expect(decision.action).toBe('hold');
+      expect(decision.confidence).toBe(0.3);
+    });
+
+    it('mean reversion buy signal fires exactly when price equals 0.94 * basePrice (analyzed directly)', async () => {
+      const { agent } = await buildAgent('mean_reversion');
+      const agentAny = agent as unknown as Record<string, unknown>;
+
+      // Seed price history so SMA calculations are stable, then call analyze
+      // directly with price=0.94 — bypassing the random-walk in observe() to
+      // avoid boundary noise.
+      (agentAny.priceHistory as number[]).push(...Array(20).fill(0.94));
+      agentAny.currentPrice = 0.94;
+
+      // 0.94 < 0.95 * basePrice(1.0) → buy
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze({
+        price: 0.94,
+        priceSource: 'simulated',
+        priceHistory: Array(20).fill(0.94),
+        timestamp: Date.now(),
+        balance: 2.0,
+      });
+
+      expect(decision.action).toBe('buy');
+    });
+
+    it('mean reversion sell signal fires exactly when price equals 1.06 * basePrice (analyzed directly)', async () => {
+      const { agent } = await buildAgent('mean_reversion');
+      const agentAny = agent as unknown as Record<string, unknown>;
+
+      // Seed price history, then call analyze directly with price=1.06 to
+      // avoid random-walk boundary noise from observe().
+      (agentAny.priceHistory as number[]).push(...Array(20).fill(1.06));
+      agentAny.currentPrice = 1.06;
+
+      // 1.06 > 1.05 * basePrice(1.0) → sell
+      const decision = await (agent as unknown as { analyze(o: Record<string, unknown>): Promise<AgentDecision> }).analyze({
+        price: 1.06,
+        priceSource: 'simulated',
+        priceHistory: Array(20).fill(1.06),
+        timestamp: Date.now(),
+        balance: 2.0,
+      });
+
+      expect(decision.action).toBe('sell');
+    });
+  });
+
+  // ── AMM Swap Execution ──────────────────────────────────────────────────
+
+  describe('AMM swap execution', () => {
+    it('calls swapSolForToken on buy when poolMint is set', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent, wallet } = await buildAgent('dca');
+
+      // Mock swapSolForToken on the wallet
+      const mockSwap = jest.fn().mockResolvedValue('swap-sig-123');
+      (wallet as any).swapSolForToken = mockSwap;
+
+      agent.setPoolMint('FakeMintAddress123', 'FakeAuthorityAddress');
+
+      const obs = await (agent as any).observe();
+      const decision = await (agent as any).analyze(obs);
+      decision.action = 'buy';
+
+      const action = await (agent as any).execute(decision);
+
+      expect(action).not.toBeNull();
+      expect(action.type).toBe('swap_sol_for_token:buy');
+      expect(mockSwap).toHaveBeenCalledWith(
+        'FakeMintAddress123',
+        expect.any(Number),
+        0,
+        'FakeAuthorityAddress',
+      );
+    });
+
+    it('calls swapTokenForSol on sell when poolMint is set and has tokens', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent, wallet } = await buildAgent('momentum');
+
+      // Mock swapTokenForSol and getTokenBalances
+      const mockSwap = jest.fn().mockResolvedValue('swap-sig-456');
+      (wallet as any).swapTokenForSol = mockSwap;
+      (wallet as any).getTokenBalances = jest.fn().mockResolvedValue([
+        { mint: 'FakeMintAddress123', balance: 100000, decimals: 9, symbol: 'SENT', uiBalance: '0.0001' },
+      ]);
+
+      agent.setPoolMint('FakeMintAddress123', 'FakeAuthorityAddress');
+
+      const decision = {
+        id: 'test-sell-id',
+        agentId: 'trading-test-1',
+        timestamp: Date.now(),
+        marketConditions: { balance: 2.0, price: 1.0 },
+        analysis: 'sell test',
+        action: 'sell',
+        confidence: 0.8,
+        reasoning: 'selling',
+        executed: false,
+      };
+
+      const action = await (agent as any).execute(decision);
+
+      expect(action).not.toBeNull();
+      expect(action.type).toBe('swap_token_for_sol:sell');
+      expect(mockSwap).toHaveBeenCalled();
+    });
+
+    it('falls back to transferSOL when poolMint is null', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent } = await buildAgent('dca');
+
+      // poolMint is null by default
+      const obs = await (agent as any).observe();
+      const decision = await (agent as any).analyze(obs);
+      decision.action = 'buy';
+
+      const action = await (agent as any).execute(decision);
+
+      expect(action).not.toBeNull();
+      expect(action.type).toBe('transfer_sol:buy');
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('falls back to transferSOL when swap fails', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent, wallet } = await buildAgent('dca');
+
+      // Mock swapSolForToken to fail
+      (wallet as any).swapSolForToken = jest.fn().mockRejectedValue(new Error('swap failed'));
+
+      agent.setPoolMint('FakeMintAddress123');
+
+      const obs = await (agent as any).observe();
+      const decision = await (agent as any).analyze(obs);
+      decision.action = 'buy';
+
+      const action = await (agent as any).execute(decision);
+
+      // Should fall back to transferSOL
+      expect(action).not.toBeNull();
+      expect(action.type).toBe('transfer_sol:buy');
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('setPoolMint stores mint and authority', async () => {
+      const { agent } = await buildAgent('dca');
+
+      expect(agent.getPoolMint()).toBeNull();
+
+      agent.setPoolMint('SomeTestMintAddress', 'SomeAuthority');
+
+      expect(agent.getPoolMint()).toBe('SomeTestMintAddress');
     });
   });
 

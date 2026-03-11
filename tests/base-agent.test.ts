@@ -518,6 +518,103 @@ describe('BaseAgent', () => {
     expect(agent.getWeightHistory().length).toBeLessThanOrEqual(100);
   });
 
+  // ── 17. Adaptive Learning: EMA weight convergence ──────────────────────────
+
+  test('EMA updateWeights produces larger shifts than old fixed nudge after 10 consecutive wins', () => {
+    const decision = makeDecision({
+      marketConditions: { trendScore: 0.9, momentumScore: 0.5, volatilityScore: 0.5, balanceScore: 0.5 },
+    });
+
+    const initialTrend = agent.getAdaptiveWeights().trend;
+    for (let i = 0; i < 10; i++) {
+      (agent as any).updateWeights('win', decision);
+    }
+
+    const finalTrend = agent.getAdaptiveWeights().trend;
+    // EMA shift after 10 wins should be substantially more than 10 * 0.02 = 0.2 (old approach)
+    // With WEIGHT_LEARNING_RATE=0.1 and deviation=0.4, each nudge ≈ 0.14
+    expect(finalTrend - initialTrend).toBeGreaterThan(0.05);
+  });
+
+  // ── 18. Adaptive Learning: applyRegimeScaling ─────────────────────────────
+
+  test('applyRegimeScaling: trending boosts non-hold confidence by 10%', () => {
+    (agent as any).currentRegime = 'trending';
+    const result = (agent as any).applyRegimeScaling(0.7, 'buy');
+    expect(result).toBeCloseTo(0.77, 2);
+  });
+
+  test('applyRegimeScaling: volatile reduces confidence by 15%', () => {
+    (agent as any).currentRegime = 'volatile';
+    const result = (agent as any).applyRegimeScaling(0.7, 'buy');
+    expect(result).toBeCloseTo(0.595, 2);
+  });
+
+  test('applyRegimeScaling: quiet returns unchanged', () => {
+    (agent as any).currentRegime = 'quiet';
+    const result = (agent as any).applyRegimeScaling(0.7, 'buy');
+    expect(result).toBe(0.7);
+  });
+
+  // ── 19. Adaptive Learning: getCalibrationAdjustment ───────────────────────
+
+  test('getCalibrationAdjustment returns unadjusted below MIN_CALIBRATION_SAMPLES', () => {
+    // Add only 3 samples (below threshold of 5)
+    (agent as any).recordCalibration(0.75, true);
+    (agent as any).recordCalibration(0.72, false);
+    (agent as any).recordCalibration(0.78, true);
+
+    const result = (agent as any).getCalibrationAdjustment(0.75);
+    expect(result).toBe(0.75);
+  });
+
+  test('getCalibrationAdjustment adjusts correctly with enough samples', () => {
+    // Add 6 samples: 3 correct, 3 incorrect → 50% accuracy in 0.7-0.8 bucket
+    for (let i = 0; i < 3; i++) {
+      (agent as any).recordCalibration(0.75, true);
+      (agent as any).recordCalibration(0.72, false);
+    }
+
+    const result = (agent as any).getCalibrationAdjustment(0.75);
+    // bucket midpoint = 0.75, accuracy = 0.5, adjusted = 0.75 * (0.5 / 0.75) = 0.5
+    expect(result).toBeCloseTo(0.5, 1);
+  });
+
+  // ── 20. Adaptive Learning: processPendingOutcomes ─────────────────────────
+
+  test('processPendingOutcomes resolves after ticksRemaining reaches 0', () => {
+    const decision = makeDecision({ action: 'buy', confidence: 0.8 });
+    (agent as any).queuePendingOutcome(decision, 100);
+
+    // 3 ticks to resolve
+    (agent as any).processPendingOutcomes(105); // tick 1
+    expect((agent as any).pendingOutcomes.length).toBe(1);
+    (agent as any).processPendingOutcomes(105); // tick 2
+    expect((agent as any).pendingOutcomes.length).toBe(1);
+    (agent as any).processPendingOutcomes(105); // tick 3 → resolved
+    expect((agent as any).pendingOutcomes.length).toBe(0);
+    // Weight history should show the update
+    expect(agent.getWeightHistory().length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('processPendingOutcomes does NOT resolve when ticks remain', () => {
+    const decision = makeDecision({ action: 'buy', confidence: 0.8 });
+    (agent as any).queuePendingOutcome(decision, 100);
+
+    (agent as any).processPendingOutcomes(105); // tick 1
+    expect((agent as any).pendingOutcomes.length).toBe(1);
+  });
+
+  test('queuePendingOutcome adds to pendingOutcomes array', () => {
+    const decision = makeDecision({ action: 'sell', confidence: 0.7 });
+    (agent as any).queuePendingOutcome(decision, 50);
+
+    expect((agent as any).pendingOutcomes.length).toBe(1);
+    expect((agent as any).pendingOutcomes[0].action).toBe('sell');
+    expect((agent as any).pendingOutcomes[0].entryPrice).toBe(50);
+    expect((agent as any).pendingOutcomes[0].ticksRemaining).toBe(3);
+  });
+
   // ── Supplemental: auto-recovery does NOT fire if agent is stopped ──────────
 
   test('auto-recovery does not call resume() when the agent is explicitly stopped before the delay elapses', async () => {

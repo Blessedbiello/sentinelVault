@@ -21,6 +21,8 @@ import {
 import { BaseAgent } from './base-agent';
 import { TradingAgent } from './trading-agent';
 import { LiquidityAgent } from './liquidity-agent';
+import { ArbitrageAgent } from './arbitrage-agent';
+import { PortfolioAgent } from './portfolio-agent';
 import { AgenticWallet } from '../core/wallet';
 import { PolicyEngine } from '../security/policy-engine';
 import { AuditLogger } from '../security/audit-logger';
@@ -490,10 +492,10 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     return Array.from(this.agents.values()).map(({ agent }) => {
       const state = agent.getState();
       // Enrich with adaptive learning data for dashboard consumption
-      (state as any).adaptiveWeights = agent.getAdaptiveWeights();
-      (state as any).marketRegime = agent.getMarketRegime();
-      (state as any).confidenceCalibration = agent.getConfidenceCalibration();
-      (state as any).recentDecisions = agent.getDecisionHistory().slice(-5);
+      state.adaptiveWeights = agent.getAdaptiveWeights();
+      state.marketRegime = agent.getMarketRegime();
+      state.confidenceCalibration = agent.getConfidenceCalibration();
+      state.recentDecisions = agent.getDecisionHistory().slice(-5);
       return state;
     });
   }
@@ -539,6 +541,24 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     return result;
   }
 
+  // ── AMM Pool Wiring ─────────────────────────────────────────────────────
+
+  /**
+   * Set the pool mint (and optional authority) on all agents that support swap
+   * execution: TradingAgent, ArbitrageAgent, PortfolioAgent.
+   */
+  setPoolMintForAgents(poolMint: string, poolAuthority?: string): void {
+    for (const [, { agent }] of this.agents.entries()) {
+      if (agent instanceof TradingAgent) {
+        agent.setPoolMint(poolMint, poolAuthority);
+      } else if (agent instanceof ArbitrageAgent) {
+        agent.setPoolMint(poolMint, poolAuthority);
+      } else if (agent instanceof PortfolioAgent) {
+        agent.setPoolMint(poolMint, poolAuthority);
+      }
+    }
+  }
+
   // ── Shutdown ──────────────────────────────────────────────────────────────
 
   /**
@@ -561,8 +581,6 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   /**
    * Instantiate the correct concrete agent class based on the requested type.
-   * 'arbitrageur' and 'portfolio_manager' fall back to TradingAgent until
-   * dedicated implementations are available.
    */
   private instantiateAgent(config: AgentConfig, wallet: AgenticWallet): BaseAgent {
     switch (config.type) {
@@ -573,18 +591,10 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
         return new LiquidityAgent(config, wallet);
 
       case 'arbitrageur':
-        console.warn(
-          `[Orchestrator] AgentType "arbitrageur" is not yet implemented; ` +
-          `falling back to TradingAgent for agent "${config.name}" (${config.id}).`,
-        );
-        return new TradingAgent(config, wallet);
+        return new ArbitrageAgent(config, wallet);
 
       case 'portfolio_manager':
-        console.warn(
-          `[Orchestrator] AgentType "portfolio_manager" is not yet implemented; ` +
-          `falling back to TradingAgent for agent "${config.name}" (${config.id}).`,
-        );
-        return new TradingAgent(config, wallet);
+        return new PortfolioAgent(config, wallet);
 
       default: {
         // Exhaustiveness guard — TypeScript should catch unreachable cases.

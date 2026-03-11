@@ -45,6 +45,7 @@ At its core, SentinelVault bridges the gap between autonomous AI decision-making
 - **AES-256-GCM Encrypted Keystores** -- Private keys are never stored in plaintext. Keystores use AES-256-GCM encryption with PBKDF2 key derivation (100,000 iterations) and are securely wiped from memory after use.
 - **OODA Decision Loop** -- Each agent follows an Observe-Orient-Decide-Act cycle, providing a structured and auditable decision-making process.
 - **8-Layer Security Policy Engine** -- Every transaction passes through eight independent validation layers before reaching the network, covering spending limits, rate controls, time windows, recipient whitelists, and more.
+- **On-Chain Constant-Product AMM** -- Custom AMM deployed on devnet enables agents to execute real token swaps (not simulated transfers). Agents trade through the pool autonomously.
 - **Multi-Agent Orchestration** -- Run multiple specialized agents in parallel with coordinated resource sharing, priority scheduling, and inter-agent communication.
 - **Real-Time Dashboard** -- Monitor agent activity, wallet balances, transaction history, and security events through a live web dashboard with WebSocket updates.
 
@@ -53,42 +54,43 @@ At its core, SentinelVault bridges the gap between autonomous AI decision-making
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  CLI / Dashboard                      │
-│          Command Line  |  REST API  |  WebSocket      │
-├──────────────────────────────────────────────────────┤
-│               Agent Orchestrator                      │
-│    ┌───────────┐  ┌───────────┐  ┌───────────┐      │
-│    │  Trading  │  │ Liquidity │  │  Custom   │      │
-│    │   Agent   │  │   Agent   │  │   Agent   │      │
-│    └─────┬─────┘  └─────┬─────┘  └─────┬─────┘      │
-│          │              │              │              │
-│    ┌─────┴──────────────┴──────────────┴─────┐       │
-│    │           OODA Decision Loop             │       │
-│    │   Observe -> Orient -> Decide -> Act     │       │
-│    └─────────────────┬───────────────────┘       │
-├──────────────────────┴───────────────────────────┤
-│                 Security Layer                        │
-│   Policy Engine  |  Audit Logger  |  Rate Limiter    │
-│   Circuit Breaker  |  Recipient Whitelist            │
-├──────────────────────────────────────────────────────┤
-│                Core Wallet Layer                      │
-│   Keystore Manager  |  AgenticWallet  |  Retry Logic  │
-│   Price Feed  |  Jupiter Quotes  |  AI Advisor       │
-├──────────────────────────────────────────────────────┤
-│                  Solana Network                       │
-│            devnet  |  testnet  |  mainnet-beta        │
-└──────────────────────────────────────────────────────┘
++--------------------------------------------------------------+
+|                  CLI / Dashboard                              |
+|          Command Line  |  REST API  |  WebSocket             |
++--------------------------------------------------------------+
+|               Agent Orchestrator                              |
+|    +----------+  +-----------+  +-----------+  +-----------+ |
+|    | Trading  |  | Liquidity |  | Arbitrage |  | Portfolio | |
+|    |  Agent   |  |   Agent   |  |   Agent   |  |   Agent   | |
+|    +----+-----+  +-----+-----+  +-----+-----+  +-----+----+ |
+|         |              |              |              |        |
+|    +----+--------------+--------------+--------------+----+  |
+|    |           OODA Decision Loop                         |  |
+|    |   Observe -> Orient -> Decide -> Act                 |  |
+|    +------------------------+-----------------------------+  |
++-----------------------------+--------------------------------+
+|                 Security Layer                                |
+|   Policy Engine  |  Audit Logger  |  Rate Limiter            |
+|   Circuit Breaker  |  Recipient Whitelist                    |
++--------------------------------------------------------------+
+|                Core Wallet Layer                              |
+|   Keystore Manager  |  AgenticWallet  |  Retry Logic         |
+|   Price Feed  |  Jupiter Quotes  |  AMM Client  |  AI Adv   |
++--------------------------------------------------------------+
+|                  Solana Network                               |
+|       devnet  |  testnet  |  mainnet-beta                    |
+|       On-chain AMM  |  Vault Program  |  SPL Token           |
++--------------------------------------------------------------+
 ```
 
 **Layer Responsibilities:**
 
 - **CLI / Dashboard** -- User-facing interfaces for managing agents, wallets, and monitoring activity.
 - **Agent Orchestrator** -- Coordinates multiple agents, manages lifecycle events, handles resource allocation, and provides inter-agent messaging.
-- **OODA Decision Loop** -- The cognitive core of each agent: observe market data, orient against strategy parameters, decide on actions, and act through the transaction engine.
+- **OODA Decision Loop** -- The cognitive core of each agent: observe market data, orient against strategy parameters, decide on actions, and act through AMM swaps or SOL transfers.
 - **Security Layer** -- Enforces policies on every transaction, logs all activity for audit purposes, and applies rate limits and circuit breakers.
-- **Core Wallet Layer** -- Manages encrypted keystores, constructs and signs transactions, handles retry logic, and integrates real price feeds (Jupiter/CoinGecko), Jupiter DEX quotes, and optional AI advisor.
-- **Solana Network** -- The underlying blockchain where all transactions are submitted and confirmed.
+- **Core Wallet Layer** -- Manages encrypted keystores, constructs and signs transactions, handles retry logic, and integrates real price feeds (Pyth oracle/Jupiter/CoinGecko), Jupiter DEX quotes, the on-chain AMM client, and optional AI advisor.
+- **Solana Network** -- The underlying blockchain where all transactions are submitted and confirmed, including the custom AMM and vault programs.
 
 ---
 
@@ -98,7 +100,7 @@ Three commands to see everything working:
 
 ```bash
 npm install           # Install dependencies
-npm test              # Run full test suite (237 tests)
+npm test              # Run full test suite (317 tests)
 npm run demo:showcase # Live demo on Solana devnet (all features)
 ```
 
@@ -149,57 +151,92 @@ npx ts-node src/cli/index.ts --help
 
 ## Demo Walkthrough
 
-Running `npm run demo:showcase` exercises all five bounty requirements against Solana devnet in a single script:
+Running `npm run demo:showcase` exercises all bounty requirements against Solana devnet in a single script:
 
 ### What Happens
 
-1. **Wallet Creation** — Two agents (Alpha-Trader, Beta-Trader) each get their own AES-256-GCM encrypted wallet with unique Solana addresses
-2. **Funding** — Each wallet receives 1 SOL via devnet airdrop (with automatic retry)
-3. **SOL Transfer** — Alpha transfers 0.1 SOL to Beta, verifiable on Solana Explorer
-4. **SPL Token Operations** — Alpha creates a SENTINEL token mint, mints 1M tokens, transfers 500K to Beta
-5. **Protocol Interaction** — Both agents write on-chain memos via Memo Program v2
-6. **Agent-to-Agent Trading** — Agents target each other's wallets, run OODA loops with multi-factor quantitative decisions
-7. **Live Dashboard** — REST API (port 3000) + WebSocket (port 3001) serve real-time agent state
-8. **Final Report** — Balances, transaction count, volume, security summary, and Explorer URLs
+1. **Wallet Creation** -- Four agents (Alpha-Trader, Beta-Trader, Gamma-Arbitrageur, Delta-Portfolio) each get their own AES-256-GCM encrypted wallet
+2. **Funding** -- Each wallet receives 1 SOL via devnet airdrop (with automatic retry and balance-skip)
+3. **Real Market Data** -- Fetches live SOL/USD from Pyth oracle (with confidence interval), Jupiter DEX quote, and AI advisor status
+4. **SOL Transfer** -- Alpha transfers 0.1 SOL to Beta, verifiable on Solana Explorer
+5. **SPL Token Operations** -- Alpha creates a SENTINEL token mint, mints 1M tokens, transfers 500K to Beta
+6. **Protocol Interaction** -- Both agents write on-chain memos via Memo Program v2
+7. **Native SOL Staking** -- Gamma delegates 1 SOL to a devnet validator via the Stake Program
+8. **On-Chain Vault** -- Alpha initializes a PDA vault via the deployed Anchor program, deposits 0.05 SOL, then withdraws 0.025 SOL back
+9. **AMM Pool Creation** -- Creates a constant-product AMM pool for the SENTINEL token, adds SOL + token liquidity
+10. **Security Policy Enforcement** -- Deliberate policy violations: per-tx limit exceeded, blocked address, unauthorized program (all 3 blocked)
+11. **All 4 Agent Types Running** -- Trader, Arbitrageur, Portfolio Manager, and Liquidity agents run OODA loops simultaneously, executing real swaps through the AMM pool with adaptive learning
+12. **Live Dashboard** -- REST API (port 3000) + WebSocket (port 3001) serve real-time agent state
+13. **Final Report** -- Balances, transaction count, volume, security summary, and Explorer URLs
+
+### Verified On-Chain Activity
+
+The AMM program is deployed on Solana devnet and can be independently verified:
+
+- **Program ID:** [`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`](https://explorer.solana.com/address/Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2?cluster=devnet)
+- **IDL Account:** [`38SZN1MHN75Vs8hRuStz7Mw2SFjGjaKXtgcNx4hH63iW`](https://explorer.solana.com/address/38SZN1MHN75Vs8hRuStz7Mw2SFjGjaKXtgcNx4hH63iW?cluster=devnet)
+- **Deploy tx:** [`23oz7NAz...Kro4Rd`](https://explorer.solana.com/tx/23oz7NAzB2UANvhU1zXcfWCVq9AU8dzwgPi6A4JKVoqFQ3PL1uUCpvHyHp7aW7u5t3T4Tw5tbZjgYcqJJ9Kro4Rd?cluster=devnet)
+
+**Latest demo run** (2026-03-11):
+
+| Operation | Transaction | Explorer Link |
+|-----------|-------------|---------------|
+| SOL Transfer (Alpha→Beta) | `4MbEpfak...` | [View](https://explorer.solana.com/tx/4MbEpfakhfpdqXdHU1k2sTbmaMqLnWuecB175Qxzvuk94NCB7VWSFm4uUUDrfVWUNpqmrCzW3b6wPcc4hsiCaTZj?cluster=devnet) |
+| Token Mint (SENTINEL) | `FUamfvKX...` | [View](https://explorer.solana.com/address/FUamfvKXjX46tXpMRLjGMjSAqZp9rKKXSxEststqDMV5?cluster=devnet) |
+| Token Transfer (Alpha→Beta) | `4baSnWGR...` | [View](https://explorer.solana.com/tx/4baSnWGRoZ1wNRR8SBv7gd2SdRz9tVjH76TH6dewrs9z8rpiRYDf8ZvA7geqQZsAzcYRFAcz2FMnqgKteYnxke6j?cluster=devnet) |
+| AMM Pool Creation | `YZomPQyu...` | [View](https://explorer.solana.com/tx/YZomPQyucU4mLmKyLRzxb92Tm2ocPhfTkNdh9ed32nW8kzpkTZhWyjSURAvhF6daYVvhCygjbQTD6GKTmfbTCLx?cluster=devnet) |
+| Add Liquidity (0.5 SOL + 200K tokens) | `4EhCamsz...` | [View](https://explorer.solana.com/tx/4EhCamszRD9RCFjLhshyoJyRT9k1Lw3S7P1dLpiV5yjvNYbYUfhSzkZFEjQJGkYZ2KbJdTNiNP8m5j7Ledg61Vkp?cluster=devnet) |
+| AMM Pool PDA | `7JpzJiw3...` | [View](https://explorer.solana.com/address/7JpzJiw3DkPfSrYA7nn6DPPvUmgQMmtMcg5cBqeaKcXW?cluster=devnet) |
+| Memo (Alpha) | `4z9zduPd...` | [View](https://explorer.solana.com/tx/4z9zduPdodjp4YmrEYsuSYTmj5L8S33WMoRUPpJVyon4byJaoGeGt1YGqmtDawjw7GAraqbmE6TZNE4yCmGkqBoW?cluster=devnet) |
+| Vault Deposit | `KUMFSQ8B...` | [View](https://explorer.solana.com/tx/KUMFSQ8BWpLBbD3nrrSReR5zG7j4jfkypJFiQVP1NJS9MStQCjqFkcWABHXaCPGpxBUTpunok6yE7CZpBtsb2jM?cluster=devnet) |
+| Vault Withdraw | `5X3DQGCn...` | [View](https://explorer.solana.com/tx/5X3DQGCnanvJ3ptkzLoEzpRqgEaUAZQiMkuvixKbBrgALZsFKJr7Dh8FMtSB42ZJ9RVJvQd6pKtFrH7CcREhk3qA?cluster=devnet) |
+
+All transaction signatures are verifiable on [Solana Explorer](https://explorer.solana.com/?cluster=devnet).
 
 ### Sample Output
 
 ```
-── Step 1 — Wallet Creation ──────────────────────
-✓ Alpha-Trader  3Kj8nPq2...
-✓ Beta-Trader   7mRx4wL1...
-✓ Wallet addresses are unique
+-- Step 1 -- Wallet Creation (4 Agent Types) ------
+  Alpha-Trader      3Kj8nPq2...  [trader]
+  Beta-Trader       7mRx4wL1...  [trader]
+  Gamma-Arbitrageur 9xQm2kR3...  [arbitrageur]
+  Delta-Portfolio   4pVn8wS1...  [portfolio_manager]
+  All 4 wallet addresses are unique
 
-── Step 2 — Airdrop Funding ──────────────────────
-✓ Alpha funded: 1.000 SOL
-✓ Beta funded:  1.000 SOL
+-- Step 5.5 -- Native SOL Staking -----------------
+  Stake account: 6tRk3pM2...
+  Delegation tx -- sig: 8nWq5xR1...
+  Native SOL staking verified
 
-── Step 3 — SOL Transfer (Alpha → Beta) ─────────
-✓ SOL transfer — sig: 5xPm3kR2...
-✓ Agent-to-agent SOL transfer verified
+-- Step 5.6 -- On-Chain Vault (Anchor Program) ----
+  Vault PDA: 8xNk3pM2...
+  Deposit tx -- sig: 4mWq5xR1...
+  Withdraw tx -- sig: 7nRk3pM2...
+  On-chain vault deposit + withdraw verified
 
-── Step 4 — SPL Token Operations ─────────────────
-✓ Token mint created: 9pVx2kM3...
-✓ Minted 1,000,000 SENTINEL tokens
-✓ Transferred 500,000 tokens to Beta
-✓ SPL token hold + transfer verified
+-- Step 5.7 -- AMM Pool + Agent Swaps -------------
+  Pool PDA: 5xMk2pN1...
+  Liquidity added -- sig: 9nWq3xR2...
+  Agents executing swaps through AMM pool
 
-── Step 5 — Memo Program (dApp Interaction) ──────
-✓ Alpha memo — sig: 4rTx8nQ2...
-✓ Beta memo  — sig: 2mKp6wR1...
-✓ On-chain memos written and confirmed
+-- Step 5.8 -- Security Policy Enforcement ---------
+  BLOCKED: per_transaction_limit_exceeded
+  BLOCKED: destination_blocked
+  BLOCKED: program_not_allowlisted
+  Security policy enforcement verified -- 3/3 checks passed
 
-── Step 6 — Agent OODA Trading ───────────────────
-✓ Alpha decision: BUY  (confidence: 0.72, factors: trend↑ momentum↑ vol↓)
-✓ Beta decision:  HOLD (confidence: 0.45, factors: trend→ momentum↓ vol→)
+-- Step 6 -- All 4 Agent Types Running ------------
+  AGENT              TYPE              STATUS     BALANCE
+  Alpha-Trader       trader            idle       0.8912 SOL
+  Beta-Trader        trader            analyzing  1.1034 SOL
+  Gamma-Arb          arbitrageur       idle       0.9500 SOL
+  Delta-Portfolio    portfolio_manager  idle       0.9800 SOL
 
-── Final Report ──────────────────────────────────
-  Transactions: 8 submitted, 8 confirmed
-  Volume: 1.6 SOL + 500K SPL tokens
-  Security: 0 policy violations, 0 circuit breaker trips
+-- Final Report ------------------------------------
+  Transactions: 15+ submitted, all confirmed
+  Volume: 2.5+ SOL + 500K SPL tokens + AMM swaps
+  Security: 3 policy violations (all intentional demo)
 ```
-
-All transaction signatures are verifiable on [Solana Explorer](https://explorer.solana.com/?cluster=devnet).
 
 ---
 
@@ -219,7 +256,7 @@ Every agent operates on a structured Observe-Orient-Decide-Act cycle:
 - **Observe** -- Gather on-chain data, price feeds, and wallet state.
 - **Orient** -- Analyze observations against the agent's strategy and risk parameters.
 - **Decide** -- Select the optimal action from the available action space.
-- **Act** -- Execute the chosen action through the wallet's secure signing pipeline.
+- **Act** -- Execute the chosen action through AMM swaps or the wallet's secure signing pipeline.
 
 ### 8-Layer Security Policy Engine
 
@@ -233,29 +270,41 @@ Transactions must pass through all eight validation layers before execution:
 7. Weekly spending limit (reject if cumulative weekly spend exceeds threshold)
 8. Rate limits (per-minute, per-hour, and per-day transaction count caps)
 
+### On-Chain Constant-Product AMM
+
+A custom AMM program deployed on devnet (`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`) using the `x * y = k` invariant with a 0.3% swap fee. Supports pool creation, liquidity provision, and bidirectional token swaps. Pool PDAs are derived from `[b"pool", authority, token_mint]`. Agents execute real on-chain swaps through the pool -- TradingAgent for buy/sell, ArbitrageAgent for oracle-vs-pool arbitrage, and PortfolioAgent for rebalancing.
+
 ### SPL Token Support
 
 Full SPL token operations including creating token mints, minting tokens, transferring tokens between agent wallets, and querying token balances. Agents can hold and manage both SOL and SPL tokens independently.
 
-### Protocol Interaction (Memo Program)
+### Protocol Interaction (Memo + Stake Program)
 
-Agents can write on-chain memos via the Solana Memo Program v2, demonstrating the ability to interact with deployed Solana programs beyond simple SOL transfers.
+Agents can write on-chain memos via the Solana Memo Program v2 and delegate SOL to Solana validators via the native Stake Program. This demonstrates the ability to interact with multiple deployed Solana programs beyond simple SOL transfers.
+
+### Native SOL Staking
+
+Agents can autonomously delegate idle SOL to validators using `wallet.stakeSOL()`. The staking flow creates a rent-exempt stake account, funds it, and delegates to a chosen validator -- all in a single transaction with proper keypair wiping.
+
+### On-Chain Vault Program (Anchor)
+
+A PDA-based vault program deployed on devnet (`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`). Each agent gets a unique vault derived from `[b"vault", owner, agent_id]` seeds. Supports `initialize_vault`, `deposit`, and `withdraw` instructions with rent-safety checks, overflow-safe arithmetic, and event emission. The TypeScript client constructs raw Anchor instructions without requiring `@coral-xyz/anchor` as a dependency.
 
 ### Multi-Factor AI Decision Engine
 
-The TradingAgent uses a multi-factor scoring system with four independent factors — trend (SMA crossover), momentum (rate of change), volatility (inverse stddev), and balance safety — combined into a weighted composite confidence score with an explainable reasoning chain.
+The TradingAgent uses a multi-factor scoring system with four independent factors -- trend (SMA crossover), momentum (rate of change), volatility (inverse stddev), and balance safety -- combined into a weighted composite confidence score with an explainable reasoning chain.
 
 ### Agent-to-Agent Transfers
 
 Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies where agents trade with each other independently.
 
-### Real Price Feeds (Jupiter + CoinGecko)
+### Real Price Feeds (Pyth Oracle + Jupiter + CoinGecko)
 
-The TradingAgent fetches real SOL/USD prices from Jupiter Price API V2, with CoinGecko as a fallback. Prices are cached for 30 seconds to avoid rate limits. When both APIs are unreachable, the agent gracefully falls back to its simulated price feed — ensuring the demo always works regardless of network conditions.
+The TradingAgent fetches real SOL/USD prices from three sources in priority order: **Pyth Network** on-chain oracle (via Hermes), Jupiter Price API V2, and CoinGecko. Pyth prices include confidence intervals for risk-aware decision making. Prices are cached for 30 seconds to avoid rate limits. When all APIs are unreachable, the agent gracefully falls back to its simulated price feed -- ensuring the demo always works regardless of network conditions.
 
 ### Jupiter DEX Swap Quotes
 
-On each OODA cycle, the agent fetches a real Jupiter V6 swap quote (SOL → USDC) to demonstrate awareness of DEX routing, price impact, and available liquidity. The quote is included in the agent's reasoning chain for full transparency. On devnet, actual execution remains as SOL transfers since Jupiter AMM pools are mainnet-only.
+On each OODA cycle, the agent fetches a real Jupiter V6 swap quote (SOL -> USDC) to demonstrate awareness of DEX routing, price impact, and available liquidity. The quote is included in the agent's reasoning chain for full transparency.
 
 ### Optional AI/LLM Advisor
 
@@ -266,24 +315,24 @@ When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, the TradingAgent blends LLM
 A web-based dashboard (http://localhost:3000) provides live visibility into all agent operations. Start it with `npm run dashboard` or as part of `npm run demo:showcase`.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  SENTINELVAULT DASHBOARD                          ● Connected   │
-├────────────┬────────────┬──────────────┬──────────┬─────────────┤
-│  Agents: 2 │  Txns: 14  │  Vol: 1.2 SOL│ TPS: 0.3 │  Mem: 48 MB │
-├────────────┴────────────┴──────────────┴──────────┴─────────────┤
-│                                                                  │
-│  ┌─ Alpha-Trader ──────────┐  ┌─ Beta-Trader ───────────────┐  │
-│  │  Status: IDLE           │  │  Status: ANALYZING          │  │
-│  │  Balance: 0.8912 SOL    │  │  Balance: 1.1034 SOL        │  │
-│  │  Strategy: Momentum     │  │  Strategy: MeanReversion     │  │
-│  │  Txns: 8  Win: 75%      │  │  Txns: 6  Win: 66%          │  │
-│  └─────────────────────────┘  └──────────────────────────────┘  │
-│                                                                  │
-│  Activity Feed (live via WebSocket)                              │
-│  ├─ 14:32:01  Alpha  BUY  0.005 SOL  confidence: 0.72          │
-│  ├─ 14:31:45  Beta   HOLD           confidence: 0.38           │
-│  └─ 14:31:30  Alpha  BUY  0.005 SOL  confidence: 0.68          │
-└──────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+|  SENTINELVAULT DASHBOARD                          * Connected     |
++------------+------------+--------------+----------+---------------+
+|  Agents: 4 |  Txns: 18  |  Vol: 2.5 SOL| TPS: 0.4 |  Mem: 52 MB |
++------------+------------+--------------+----------+---------------+
+|                                                                    |
+|  +- Alpha-Trader -----------+  +- Gamma-Arbitrageur ----------+  |
+|  |  Status: IDLE            |  |  Status: ANALYZING           |  |
+|  |  Balance: 0.8912 SOL     |  |  Balance: 0.9500 SOL         |  |
+|  |  Strategy: Momentum      |  |  Strategy: Arbitrage          |  |
+|  |  Txns: 8  Win: 75%       |  |  Txns: 4  Win: 50%           |  |
+|  +---------------------------+  +------------------------------+  |
+|                                                                    |
+|  Activity Feed (live via WebSocket)                                |
+|  |- 14:32:01  Alpha  BUY  0.005 SOL  via AMM swap                |
+|  |- 14:31:45  Gamma  ARB  0.003 SOL  oracle-vs-pool spread       |
+|  +- 14:31:30  Delta  REBALANCE       via AMM swap                 |
++------------------------------------------------------------------+
 ```
 
 ### CLI Interface
@@ -335,11 +384,31 @@ const tokens = await wallet.getTokenBalances();
 console.log(tokens); // [{ mint, symbol, balance, decimals, uiBalance }]
 ```
 
+### AMM Pool Operations
+
+```typescript
+// Create an AMM pool for a token mint
+const { poolPda, signature } = await wallet.createAmmPool(tokenMintAddress);
+
+// Add liquidity (SOL + tokens)
+await wallet.addLiquidity(tokenMintAddress, 0.5, 1000);
+
+// Swap SOL for tokens
+await wallet.swapSolForToken(tokenMintAddress, 0.1);
+
+// Swap tokens for SOL
+await wallet.swapTokenForSol(tokenMintAddress, 100);
+
+// Query pool state
+const pool = await wallet.getPoolState(tokenMintAddress);
+console.log(pool); // { solReserve, tokenReserve, feeRate, price }
+```
+
 ### On-Chain Memo (Protocol Interaction)
 
 ```typescript
 // Write a memo on-chain via the Memo Program v2
-const sig = await wallet.sendMemo('Agent Alpha initialized — strategy: momentum');
+const sig = await wallet.sendMemo('Agent Alpha initialized -- strategy: momentum');
 console.log('Memo tx:', wallet.getExplorerUrl(sig));
 ```
 
@@ -365,6 +434,9 @@ const alphaId = await orchestrator.createAgent({
     cooldownMs: 15_000,
   },
 });
+
+// Wire AMM pool to all agents for real swap execution
+orchestrator.setPoolMintForAgents(tokenMintAddress);
 
 // Fund and start
 await orchestrator.fundAllAgents(1);
@@ -547,40 +619,44 @@ Audit logs can be exported in JSON or CSV format for external analysis.
 
 ```
 sentinelVault/
-├── src/
-│   ├── index.ts             # Public barrel exports
-│   ├── types/index.ts       # All TypeScript interfaces and types
-│   ├── core/                # Wallet and keystore
-│   │   ├── keystore.ts      #   AES-256-GCM encrypted keystore manager
-│   │   └── wallet.ts        #   AgenticWallet (SOL + SPL + Memo)
-│   ├── security/            # Policy engine and audit logging
-│   │   ├── policy-engine.ts #   8-layer security validation chain
-│   │   └── audit-logger.ts  #   Structured audit log with risk scoring
-│   ├── integrations/        # External protocol integrations
-│   │   ├── price-feed.ts    #   Real SOL/USD from Jupiter + CoinGecko
-│   │   ├── jupiter.ts       #   Jupiter V6 DEX quote/swap client
-│   │   └── ai-advisor.ts    #   Optional LLM trade advisor (Claude/OpenAI)
-│   ├── agents/              # Agent implementations and orchestrator
-│   │   ├── base-agent.ts    #   Abstract OODA loop base class
-│   │   ├── trading-agent.ts #   Multi-factor trading + real prices + AI
-│   │   ├── liquidity-agent.ts # Simulated LP pool management
-│   │   └── orchestrator.ts  #   Multi-agent lifecycle coordinator
-│   ├── cli/index.ts         # Commander-based CLI
-│   └── dashboard/           # REST API + WebSocket + HTML dashboard
-│       ├── server.ts
-│       └── public/index.html # Live dashboard UI
-├── tests/                   # Jest test files (*.test.ts)
-├── scripts/                 # Demo scripts
-│   ├── demo.ts              #   Full multi-agent demo
-│   ├── demo-multi-agent.ts  #   Wallet independence demo
-│   ├── demo-trading.ts      #   Single trading agent demo
-│   ├── demo-showcase.ts     #   Judge-facing showcase (all bounty requirements)
-│   └── live-dashboard-demo.ts # Live dashboard demo with agents
-├── .sentinelvault/          # Runtime data (keystores, audit logs)
-├── .env.example
-├── package.json
-├── tsconfig.json
-└── README.md
++-- src/
+|   +-- index.ts             # Public barrel exports
+|   +-- types/index.ts       # All TypeScript interfaces and types
+|   +-- core/                # Wallet and keystore
+|   |   +-- keystore.ts      #   AES-256-GCM encrypted keystore manager
+|   |   +-- wallet.ts        #   AgenticWallet (SOL + SPL + Memo + AMM)
+|   +-- security/            # Policy engine and audit logging
+|   |   +-- policy-engine.ts #   8-layer security validation chain
+|   |   +-- audit-logger.ts  #   Structured audit log with risk scoring
+|   +-- integrations/        # External protocol integrations
+|   |   +-- price-feed.ts    #   Real SOL/USD from Pyth + Jupiter + CoinGecko
+|   |   +-- jupiter.ts       #   Jupiter V6 DEX quote/swap client
+|   |   +-- amm-client.ts    #   TypeScript client for on-chain constant-product AMM
+|   |   +-- ai-advisor.ts    #   Optional LLM trade advisor (Claude/OpenAI)
+|   +-- agents/              # Agent implementations and orchestrator
+|   |   +-- base-agent.ts    #   Abstract OODA loop base class
+|   |   +-- trading-agent.ts #   Multi-factor trading + real prices + AMM swaps
+|   |   +-- liquidity-agent.ts # Simulated LP pool management
+|   |   +-- arbitrage-agent.ts # Oracle-vs-pool arbitrage with AMM execution
+|   |   +-- portfolio-agent.ts # Portfolio rebalancing via AMM swaps
+|   |   +-- orchestrator.ts  #   Multi-agent lifecycle coordinator
+|   +-- cli/index.ts         # Commander-based CLI
+|   +-- dashboard/           # REST API + WebSocket + HTML dashboard
+|       +-- server.ts
+|       +-- public/index.html # Live dashboard UI
++-- programs/                # Anchor on-chain programs (AMM, vault)
++-- tests/                   # Jest test files (*.test.ts)
++-- scripts/                 # Demo scripts
+|   +-- demo.ts              #   Full multi-agent demo
+|   +-- demo-multi-agent.ts  #   Wallet independence demo
+|   +-- demo-trading.ts      #   Single trading agent demo
+|   +-- demo-showcase.ts     #   Judge-facing showcase (all bounty requirements)
+|   +-- live-dashboard-demo.ts # Live dashboard demo with agents
++-- .sentinelvault/          # Runtime data (keystores, audit logs)
++-- .env.example
++-- package.json
++-- tsconfig.json
++-- README.md
 ```
 
 ---
@@ -606,7 +682,7 @@ npx jest --testPathPattern="security"
 
 ### Test Coverage
 
-Run `npm run test:coverage` to see current coverage. The test suite includes 237 tests across 14 suites covering core wallet operations, security policy engine, audit logging, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
+Run `npm run test:coverage` to see current coverage. The test suite includes 317 tests across 15 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
 
 ---
 

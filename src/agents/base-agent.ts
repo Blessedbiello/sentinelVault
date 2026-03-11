@@ -15,6 +15,7 @@ import {
   WeightUpdate,
   MarketRegime,
   ConfidenceCalibration,
+  PendingOutcome,
 } from '../types';
 import { AgenticWallet } from '../core/wallet';
 import { PolicyEngine } from '../security/policy-engine';
@@ -36,7 +37,9 @@ const AUTO_RECOVERY_DELAY_MS = 5_000;
 const MAX_DECISION_HISTORY = 500;
 const MAX_WEIGHT_HISTORY = 100;
 const DEFAULT_WEIGHTS: AdaptiveWeights = { trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 };
-const WEIGHT_NUDGE = 0.02;
+const WEIGHT_LEARNING_RATE = 0.1;
+const OUTCOME_EVAL_TICKS = 3;
+const MIN_CALIBRATION_SAMPLES = 5;
 
 // ─── BaseAgent ────────────────────────────────────────────────────────────────
 
@@ -59,6 +62,7 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   protected weightHistory: WeightUpdate[];
   protected currentRegime: MarketRegime;
   private confidenceBuckets: Map<string, { total: number; correct: number }>;
+  protected pendingOutcomes: PendingOutcome[] = [];
 
   private policyEngine: PolicyEngine | null = null;
   private status: AgentStatus;
@@ -282,7 +286,7 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
     return this.config.name;
   }
 
-  /** Return the agent type (trader, arbitrageur, etc.). */
+  /** Return the agent type (trader, liquidity_provider, arbitrageur, portfolio_manager). */
   getType(): AgentConfig['type'] {
     return this.config.type;
   }
@@ -373,8 +377,9 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   }
 
   /**
-   * Hill-climbing weight update: nudge the dominant factor's weight by
-   * +WEIGHT_NUDGE on win, -WEIGHT_NUDGE on loss. Re-normalize to sum=1.
+   * EMA-based weight update: adjust the dominant factor's weight proportional
+   * to its deviation strength. Larger signals get larger updates than the old
+   * fixed ±0.02 nudge. Re-normalizes to sum=1, floors each weight at 0.05.
    */
   protected updateWeights(outcome: 'win' | 'loss', decision: AgentDecision): void {
     const mc = decision.marketConditions;
@@ -397,8 +402,9 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
     }
 
     const oldWeights = { ...this.adaptiveWeights };
-    const nudge = outcome === 'win' ? WEIGHT_NUDGE : -WEIGHT_NUDGE;
-    this.adaptiveWeights[dominantFactor] = Math.max(0.05, this.adaptiveWeights[dominantFactor] + nudge);
+    const direction = outcome === 'win' ? 1 : -1;
+    const adjustment = direction * WEIGHT_LEARNING_RATE * (1 + maxDeviation);
+    this.adaptiveWeights[dominantFactor] = Math.max(0.05, this.adaptiveWeights[dominantFactor] + adjustment);
 
     // Normalize to sum=1
     const sum = Object.values(this.adaptiveWeights).reduce((s, v) => s + v, 0);
@@ -410,7 +416,7 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
       timestamp: Date.now(),
       oldWeights,
       newWeights: { ...this.adaptiveWeights },
-      trigger: `hill-climb after ${outcome} trade (dominant: ${dominantFactor})`,
+      trigger: `ema-update after ${outcome} (dominant: ${dominantFactor}, deviation: ${maxDeviation.toFixed(3)})`,
     };
     this.weightHistory.push(update);
     if (this.weightHistory.length > MAX_WEIGHT_HISTORY) {
@@ -459,6 +465,91 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
       });
     }
     return result.sort((a, b) => a.predictedBucket.localeCompare(b.predictedBucket));
+  }
+
+  // ── Adaptive Decision Methods ────────────────────────────────────────────
+
+  /**
+   * Scale confidence based on the current market regime.
+   * Trending regimes boost buy/sell confidence; volatile regimes reduce it.
+   */
+  protected applyRegimeScaling(confidence: number, action: string): number {
+    switch (this.currentRegime) {
+      case 'trending':
+        return action !== 'hold' ? confidence * 1.10 : confidence;
+      case 'volatile':
+        return confidence * 0.85;
+      default:
+        return confidence;
+    }
+  }
+
+  /**
+   * Adjust confidence based on historical calibration accuracy.
+   * If the bucket for this confidence level has enough samples and the actual
+   * accuracy differs from the predicted midpoint, scale accordingly.
+   */
+  protected getCalibrationAdjustment(confidence: number): number {
+    const bucketStart = Math.floor(confidence * 10) / 10;
+    const bucketKey = `${bucketStart.toFixed(1)}-${(bucketStart + 0.1).toFixed(1)}`;
+    const entry = this.confidenceBuckets.get(bucketKey);
+
+    if (!entry || entry.total < MIN_CALIBRATION_SAMPLES) {
+      return confidence;
+    }
+
+    const actualAccuracy = entry.correct / entry.total;
+    const bucketMidpoint = bucketStart + 0.05;
+    return confidence * (actualAccuracy / bucketMidpoint);
+  }
+
+  /**
+   * Process pending outcomes that have reached their evaluation horizon.
+   * Decrements ticksRemaining for all pending outcomes; when an outcome
+   * reaches 0, evaluates win/loss based on price change and updates weights.
+   */
+  protected processPendingOutcomes(currentPrice: number): void {
+    const resolved: PendingOutcome[] = [];
+    const remaining: PendingOutcome[] = [];
+
+    for (const po of this.pendingOutcomes) {
+      po.ticksRemaining -= 1;
+      if (po.ticksRemaining <= 0) {
+        resolved.push(po);
+      } else {
+        remaining.push(po);
+      }
+    }
+
+    this.pendingOutcomes = remaining;
+
+    for (const po of resolved) {
+      const priceWentUp = currentPrice > po.entryPrice;
+      const wasCorrect =
+        (po.action === 'buy' && priceWentUp) ||
+        (po.action === 'sell' && !priceWentUp) ||
+        (po.action === 'arbitrage' && priceWentUp) ||
+        (po.action === 'rebalance_to_tokens' && !priceWentUp) ||
+        (po.action === 'rebalance_to_sol' && priceWentUp);
+
+      const outcome = wasCorrect ? 'win' : 'loss';
+      this.updateWeights(outcome, po.decision);
+      this.recordCalibration(po.confidence, wasCorrect);
+    }
+  }
+
+  /**
+   * Queue a pending outcome for deferred evaluation after OUTCOME_EVAL_TICKS cycles.
+   */
+  protected queuePendingOutcome(decision: AgentDecision, entryPrice: number): void {
+    this.pendingOutcomes.push({
+      decisionId: decision.id,
+      action: decision.action,
+      entryPrice,
+      confidence: decision.confidence,
+      ticksRemaining: OUTCOME_EVAL_TICKS,
+      decision,
+    });
   }
 
   // ── Policy Engine ──────────────────────────────────────────────────────────
