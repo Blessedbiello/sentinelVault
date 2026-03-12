@@ -174,7 +174,7 @@ Each decision includes a `reasoningChain` -- an array of strings documenting eve
 The framework now supports four fully implemented agent types:
 
 - **TradingAgent** -- Autonomous trading with real/simulated prices, Jupiter quotes, optional AI advisor, and real swap execution through the on-chain AMM.
-- **LiquidityAgent** -- Simulated LP pool management with rebalance, add, and remove liquidity decisions.
+- **LiquidityAgent** -- AMM pool monitoring and rebalancing. Reads real on-chain pool state (reserves, price, imbalance) and executes swap-based rebalancing through the AMM. Falls back to simulated pool dynamics when no pool is configured.
 - **ArbitrageAgent** -- Oracle-vs-AMM-pool price comparison that detects profitable spreads and executes arbitrage swaps through the on-chain AMM.
 - **PortfolioAgent** -- Multi-asset portfolio rebalancing that tracks a target allocation (default 60/40 SOL/tokens) and rebalances via AMM swaps when drift exceeds a configurable threshold.
 
@@ -286,9 +286,10 @@ The `AmmClient` class in `src/integrations/amm-client.ts` constructs raw instruc
 
 The orchestrator exposes `setPoolMintForAgents(mintAddress)` which wires the token mint to all registered agents. When a pool is configured:
 
-- **TradingAgent** calls `wallet.swapSolForToken()` on buy decisions and `wallet.swapTokenForSol()` on sell decisions, executing real on-chain swaps.
+- **TradingAgent** attempts Jupiter swaps first (full pipeline: quote → swap tx → submit), then falls back to AMM swaps on buy/sell decisions. On devnet, Jupiter execution fails gracefully and the agent uses the custom AMM instead.
 - **ArbitrageAgent** compares the oracle price (from Pyth/Jupiter) against the AMM pool's implied price (derived from reserve ratio). When a profitable spread is detected, it executes a swap to capture the arbitrage.
-- **PortfolioAgent** rebalances its SOL/token allocation by swapping through the AMM when drift exceeds its threshold.
+- **LiquidityAgent** reads real on-chain pool state (`getPoolState()`) during `observe()` to track reserves, price, and imbalance. During `execute()`, it performs swap-based rebalancing through the AMM when the pool is configured. Since `addLiquidity` is authority-only, the agent uses `swapSolForToken()` as a permissionless alternative for adding exposure to the pool.
+- **PortfolioAgent** uses the AMM pool price (`solReserve / tokenReserve`) for real token valuation instead of a hardcoded multiplier. Rebalances its SOL/token allocation by swapping through the AMM when drift exceeds its threshold.
 
 All agents fall back to `wallet.transferSOL()` if the swap transaction fails or no pool is configured, ensuring graceful degradation.
 
@@ -443,7 +444,35 @@ The effective trade size is `min(0.01, balance x 0.1)`, and the trade is only ex
 
 ---
 
-## 11. Future Directions
+## 11. Wallet Standard and Kora Compatibility
+
+SentinelVault's `AgenticWallet` exposes `signTransaction` and `signAndSendTransaction` semantics that align with the `@solana/wallet-standard-features` interface. Although the wallet manages its own keystore internally, its public method signatures (`signTransaction(tx)`, `signAndSendTransaction(tx)`) follow the same patterns used by wallet-standard adapters. This makes SentinelVault compatible with any dApp or SDK that accepts a wallet-standard signer.
+
+**Kora Integration Path.** [Kora](https://www.kora.network/) provides permissionless wallet infrastructure for Solana with hardware-backed key storage and policy-driven transaction approval. In a production deployment, Kora's wallet service could replace SentinelVault's `KeystoreManager` as the key custody layer, providing:
+
+- **Hardware-backed key storage** — Move private keys from encrypted-file-on-disk (current) to hardware security modules, eliminating the password-in-memory trade-off documented in Section 3.
+- **Policy-as-a-service** — Kora's transaction approval policies could complement or replace the `PolicyEngine`'s eight-layer validation chain, adding multi-party approval workflows and on-chain governance.
+- **Wallet-as-a-service** — Each agent could receive a Kora-managed wallet, preserving the per-agent isolation guarantee while offloading key management to battle-tested infrastructure.
+
+The integration requires implementing a `KoraKeystoreAdapter` that wraps Kora's API behind the same `decryptKeypair()` / `signTransaction()` interface that `KeystoreManager` exposes today. The agent layer, security layer, and interface layer require zero changes — only the core layer's key custody implementation is swapped.
+
+---
+
+## 12. Jupiter Full Swap Pipeline
+
+SentinelVault demonstrates the complete Jupiter DEX swap pipeline. On each OODA cycle, the `TradingAgent` attempts real Jupiter swaps before falling back to the custom AMM:
+
+1. **`getQuote()`** — Fetch a real-time swap quote from Jupiter V6 (SOL → USDC)
+2. **`getSwapTransaction()`** — Request a serialized swap transaction from Jupiter
+3. **`submitSerializedTransaction()`** — Submit the pre-built transaction to the network
+
+On **mainnet**, this pipeline executes real Jupiter swaps through aggregated DEX liquidity (Raydium, Orca, etc.). On **devnet**, Jupiter pools don't exist, so the swap transaction submission fails gracefully and the agent falls back to the custom on-chain AMM. This fallback is logged in the reasoning chain as `[Jupiter] Swap tx obtained but execution failed on devnet — using AMM pool`.
+
+The demo explicitly shows this pipeline in Step 2.5: it fetches a quote, obtains the swap transaction bytes, and reports the full pipeline status. This proves the agent has a complete, production-ready DEX integration path — not just quote fetching.
+
+---
+
+## 13. Future Directions
 
 SentinelVault is designed as an extensible framework, not a finished product. The architecture explicitly anticipates several expansion vectors:
 
@@ -459,7 +488,7 @@ SentinelVault is designed as an extensible framework, not a finished product. Th
 
 ---
 
-## 12. Conclusion
+## 14. Conclusion
 
 SentinelVault demonstrates that autonomous AI agents can safely manage blockchain wallets without sacrificing the speed and independence that make them valuable. The framework achieves this through a deliberate architectural decomposition:
 

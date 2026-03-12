@@ -365,4 +365,91 @@ describe('LiquidityAgent', () => {
       expect(transferSpy).toHaveBeenCalledWith(newAddress, 0.005);
     });
   });
+
+  // ── AMM Pool Integration ────────────────────────────────────────────────────
+
+  describe('AMM pool integration', () => {
+    it('setPoolMint stores mint and authority', async () => {
+      const { agent } = await createAgent();
+      (agent as any).setPoolMint('TestMint123', 'TestAuth456');
+      expect((agent as any).poolMint).toBe('TestMint123');
+      expect((agent as any).poolAuthority).toBe('TestAuth456');
+    });
+
+    it('observe uses wallet.getPoolState when pool is configured', async () => {
+      const { agent, wallet } = await createAgent();
+      const mockGetPoolState = jest.fn().mockResolvedValue({
+        solReserve: 500_000_000, // 0.5 SOL in lamports
+        tokenReserve: 100_000,
+        feeBps: 30,
+        authority: 'TestAuth',
+        tokenMint: 'TestMint',
+        bump: 255,
+      });
+      (wallet as any).getPoolState = mockGetPoolState;
+      (agent as any).setPoolMint('TestMint', 'TestAuth');
+
+      const obs = await (agent as any).observe();
+      expect(mockGetPoolState).toHaveBeenCalledWith('TestMint', 'TestAuth');
+      expect(obs.onChainPool).toBe(true);
+      // 0.5 SOL in lamports / LAMPORTS_PER_SOL = 0.5
+      expect(obs.tokenABalance).toBeCloseTo(0.5, 2);
+    });
+
+    it('execute rebalance calls swapSolForToken when pool is set', async () => {
+      const { agent, wallet } = await createAgent();
+      const mockSwap = jest.fn().mockResolvedValue('swap-rebal-sig');
+      (wallet as any).swapSolForToken = mockSwap;
+      (agent as any).setPoolMint('TestMint', 'TestAuth');
+
+      const decision = makeDecision({ action: 'rebalance', confidence: 0.8 });
+      const action = await (agent as any).execute(decision);
+
+      expect(mockSwap).toHaveBeenCalled();
+      expect(action).not.toBeNull();
+      expect(action!.type).toBe('rebalance:swap_sol_for_token');
+    });
+
+    it('execute add_liquidity calls swapSolForToken when pool is set', async () => {
+      const { agent, wallet } = await createAgent();
+      const mockSwap = jest.fn().mockResolvedValue('swap-liq-sig');
+      (wallet as any).swapSolForToken = mockSwap;
+      (agent as any).setPoolMint('TestMint', 'TestAuth');
+
+      const decision = makeDecision({ action: 'add_liquidity', confidence: 0.7 });
+      const action = await (agent as any).execute(decision);
+
+      expect(mockSwap).toHaveBeenCalled();
+      expect(action).not.toBeNull();
+      expect(action!.type).toBe('add_liquidity:swap_sol_for_token');
+    });
+
+    it('execute falls back to transferSOL when swap fails', async () => {
+      const { agent, wallet } = await createAgent();
+      (wallet as any).swapSolForToken = jest.fn().mockRejectedValue(new Error('swap failed'));
+      (agent as any).setPoolMint('TestMint');
+
+      const decision = makeDecision({ action: 'rebalance', confidence: 0.8 });
+      const action = await (agent as any).execute(decision);
+
+      expect(action).not.toBeNull();
+      expect(action!.type).toBe('rebalance'); // fell back to plain rebalance
+      expect(mockSendRawTransaction).toHaveBeenCalled();
+    });
+
+    it('execute uses simulated behavior when no pool configured', async () => {
+      const { agent } = await createAgent();
+      // No setPoolMint called — pool is null
+      (agent as any).pool.imbalance = 0.20;
+
+      const transferSpy = jest.spyOn((agent as any).wallet, 'transferSOL');
+      const decision = makeDecision({ action: 'rebalance', confidence: 0.8 });
+      const action = await (agent as any).execute(decision);
+
+      expect(transferSpy).toHaveBeenCalled();
+      expect(action!.type).toBe('rebalance');
+      // Imbalance should be halved (simulated behavior)
+      expect(agent.getPoolState().imbalance).toBeCloseTo(0.10, 10);
+    });
+  });
 });

@@ -50,6 +50,8 @@ interface OrchestratorEvents {
   'agent:removed': [agentId: string];
   'alert': [alert: AlertEntry];
   'metrics:updated': [metrics: SystemMetrics];
+  'pool:updated': [data: unknown];
+  'transaction:executed': [data: unknown];
 }
 
 // ─── Agent Registry Entry ─────────────────────────────────────────────────────
@@ -554,6 +556,8 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
       } else if (agent instanceof ArbitrageAgent) {
         agent.setPoolMint(poolMint, poolAuthority);
       } else if (agent instanceof PortfolioAgent) {
+        agent.setPoolMint(poolMint, poolAuthority);
+      } else if (agent instanceof LiquidityAgent) {
         agent.setPoolMint(poolMint, poolAuthority);
       }
     }

@@ -34,7 +34,7 @@
 
 SentinelVault is a framework for deploying autonomous AI agents that manage their own Solana wallets. It provides the infrastructure needed to build, secure, and orchestrate intelligent agents that can independently execute on-chain transactions, manage liquidity positions, and respond to market conditions -- all within a robust security boundary that you define.
 
-> **For judges:** Run `npm run demo:showcase` to see all bounty requirements exercised on devnet in one script. See [SKILLS.md](SKILLS.md) for detailed agent capability mapping and [DEEP_DIVE.md](DEEP_DIVE.md) for architecture analysis and benchmarks.
+> Run `npm run demo:showcase` to see all features exercised on devnet in one script. See [SKILLS.md](SKILLS.md) for detailed agent capability mapping and [DEEP_DIVE.md](DEEP_DIVE.md) for architecture deep dive and benchmarks.
 
 ### What It Does
 
@@ -89,18 +89,20 @@ At its core, SentinelVault bridges the gap between autonomous AI decision-making
 - **Agent Orchestrator** -- Coordinates multiple agents, manages lifecycle events, handles resource allocation, and provides inter-agent messaging.
 - **OODA Decision Loop** -- The cognitive core of each agent: observe market data, orient against strategy parameters, decide on actions, and act through AMM swaps or SOL transfers.
 - **Security Layer** -- Enforces policies on every transaction, logs all activity for audit purposes, and applies rate limits and circuit breakers.
-- **Core Wallet Layer** -- Manages encrypted keystores, constructs and signs transactions, handles retry logic, and integrates real price feeds (Pyth oracle/Jupiter/CoinGecko), Jupiter DEX quotes, the on-chain AMM client, and optional AI advisor.
+- **Core Wallet Layer** -- Manages encrypted keystores, constructs and signs transactions, handles retry logic, and integrates real price feeds (Pyth oracle/Jupiter/CoinGecko), Jupiter DEX quotes, the on-chain AMM client, and optional AI advisor. The `KeystoreManager` exposes `signTransaction`/`signAndSendTransaction` semantics compatible with Solana wallet-standard, making it swappable with [Kora](https://www.kora.network/) wallet infrastructure for production hardware-backed key custody (see [DEEP_DIVE.md](DEEP_DIVE.md#11-wallet-standard-and-kora-compatibility)).
 - **Solana Network** -- The underlying blockchain where all transactions are submitted and confirmed, including the custom AMM and vault programs.
 
 ---
 
-## Judge Quick Start
+## Try It Now
 
-Three commands to see everything working:
+**Live Dashboard:** [https://sentinelvault-dashboard.fly.dev](https://sentinelvault-dashboard.fly.dev) — 5 autonomous agents running OODA loops on Solana devnet in real-time. No setup required.
+
+Or run locally:
 
 ```bash
 npm install           # Install dependencies
-npm test              # Run full test suite (317 tests)
+npm test              # Run full test suite (328 tests)
 npm run demo:showcase # Live demo on Solana devnet (all features)
 ```
 
@@ -127,7 +129,7 @@ npm install
 # Run initial setup (configures devnet, creates demo wallets)
 npm run setup    # or: bash scripts/setup-devnet.sh
 
-# Run the showcase demo (recommended — exercises all bounty requirements)
+# Run the showcase demo (recommended — exercises all features)
 npm run demo:showcase
 
 # Or run the full multi-agent demo on devnet
@@ -151,7 +153,7 @@ npx ts-node src/cli/index.ts --help
 
 ## Demo Walkthrough
 
-Running `npm run demo:showcase` exercises all bounty requirements against Solana devnet in a single script:
+Running `npm run demo:showcase` exercises all core features against Solana devnet in a single script:
 
 ### What Happens
 
@@ -650,7 +652,7 @@ sentinelVault/
 |   +-- demo.ts              #   Full multi-agent demo
 |   +-- demo-multi-agent.ts  #   Wallet independence demo
 |   +-- demo-trading.ts      #   Single trading agent demo
-|   +-- demo-showcase.ts     #   Judge-facing showcase (all bounty requirements)
+|   +-- demo-showcase.ts     #   Full-feature showcase demo
 |   +-- live-dashboard-demo.ts # Live dashboard demo with agents
 +-- .sentinelvault/          # Runtime data (keystores, audit logs)
 +-- .env.example
@@ -682,7 +684,7 @@ npx jest --testPathPattern="security"
 
 ### Test Coverage
 
-Run `npm run test:coverage` to see current coverage. The test suite includes 317 tests across 15 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
+Run `npm run test:coverage` to see current coverage. The test suite includes 328 tests across 15 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
 
 ---
 

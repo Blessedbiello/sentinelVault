@@ -498,11 +498,37 @@ export class TradingAgent extends BaseAgent {
       return null;
     }
 
-    let signature: string;
-    let actionType: string;
+    let signature: string | undefined;
+    let actionType: string = decision.action === 'buy' ? 'transfer_sol:buy' : 'transfer_sol:sell';
 
-    // Try AMM swap if pool is configured, otherwise fall back to transferSOL
-    if (this.poolMint && decision.action === 'buy') {
+    // Try Jupiter swap first (works on mainnet, fails on devnet)
+    let jupiterAttempted = false;
+    if (decision.action === 'buy') {
+      try {
+        const quote = await this.jupiterClient.getQuote({ amount: Math.round(amount * LAMPORTS_PER_SOL) });
+        if (quote) {
+          const pubkey = this.wallet.getState()?.publicKey;
+          if (pubkey) {
+            const swapTx = await this.jupiterClient.getSwapTransaction(quote, pubkey);
+            if (swapTx) {
+              jupiterAttempted = true;
+              signature = await this.wallet.submitSerializedTransaction(swapTx);
+              actionType = 'buy:jupiter_swap';
+            }
+          }
+        }
+      } catch {
+        // Expected on devnet — fall through to AMM swap
+        if (jupiterAttempted) {
+          console.log(
+            `[${this.config.name}] Jupiter swap tx obtained but execution failed on devnet — using AMM pool`,
+          );
+        }
+      }
+    }
+
+    // Try AMM swap if Jupiter didn't succeed and pool is configured
+    if (!signature && this.poolMint && decision.action === 'buy') {
       try {
         const lamports = Math.round(amount * LAMPORTS_PER_SOL);
         signature = await this.wallet.swapSolForToken(
@@ -535,6 +561,16 @@ export class TradingAgent extends BaseAgent {
           console.error(`[${this.config.name}] Transfer also failed: ${message2}`);
           return null;
         }
+      }
+    } else if (!signature && !this.poolMint && decision.action === 'buy') {
+      // No pool, no Jupiter — fall back to transferSOL
+      try {
+        signature = await this.wallet.transferSOL(this.targetAddress, amount);
+        actionType = 'transfer_sol:buy';
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[${this.config.name}] Transfer failed: ${message}`);
+        return null;
       }
     } else if (this.poolMint && decision.action === 'sell') {
       try {
@@ -578,8 +614,8 @@ export class TradingAgent extends BaseAgent {
           return null;
         }
       }
-    } else {
-      // No poolMint — use traditional transfer
+    } else if (!signature) {
+      // No poolMint for sell — use traditional transfer
       try {
         signature = await this.wallet.transferSOL(this.targetAddress, amount);
         actionType = decision.action === 'buy' ? 'transfer_sol:buy' : 'transfer_sol:sell';
@@ -602,6 +638,11 @@ export class TradingAgent extends BaseAgent {
           // Memo is best-effort — does not block the trade
         }
       }
+    }
+
+    if (!signature) {
+      console.error(`[${this.config.name}] No signature obtained for ${decision.action}`);
+      return null;
     }
 
     const action: AgentAction = {

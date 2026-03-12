@@ -1138,17 +1138,21 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   }
 
   /**
-   * Get the AMM pool state for a given token mint (pool created by this wallet).
+   * Get the AMM pool state for a given token mint.
    *
-   * @param tokenMint - The token mint address.
+   * @param tokenMint     - The token mint address.
+   * @param poolAuthority - Optional pool creator's public key for PDA derivation.
+   *                        Defaults to this wallet's public key.
    * @returns Pool state or null if pool doesn't exist.
    */
-  async getPoolState(tokenMint: string): Promise<PoolState | null> {
+  async getPoolState(tokenMint: string, poolAuthority?: string): Promise<PoolState | null> {
     this.assertReady();
 
     const ammClient = new AmmClient(this.connection!);
     const mintPubkey = new PublicKey(tokenMint);
-    const ownerPubkey = new PublicKey(this.state!.publicKey);
+    const ownerPubkey = poolAuthority
+      ? new PublicKey(poolAuthority)
+      : new PublicKey(this.state!.publicKey);
     const [poolPDA] = ammClient.derivePoolPDA(ownerPubkey, mintPubkey);
 
     return ammClient.getPoolState(poolPDA);

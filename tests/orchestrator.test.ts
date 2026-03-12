@@ -90,6 +90,7 @@ function createMockAgent(config: any) {
       averageExecutionTime: 0,
     }),
     setPolicyEngine: jest.fn(),
+    setPoolMint: jest.fn(),
     getDecisionHistory: jest.fn().mockReturnValue([]),
     getAdaptiveWeights: jest.fn().mockReturnValue({ trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 }),
     getMarketRegime: jest.fn().mockReturnValue('quiet'),
@@ -658,6 +659,31 @@ describe('AgentOrchestrator', () => {
 
     const dashboard = orchestrator.getDashboardState();
     expect(dashboard.recentTransactions.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── setPoolMintForAgents ──────────────────────────────────────────────────
+
+  test('setPoolMintForAgents iterates all agent types without throwing', async () => {
+    orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+
+    // Create one agent of each type to ensure the method iterates all branches
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'trader', name: 'T1' }));
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'liquidity_provider', name: 'LP1' }));
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'arbitrageur', name: 'Arb1' }));
+    await orchestrator.createAgent(makeCreateAgentParams({ type: 'portfolio_manager', name: 'PM1' }));
+
+    expect(orchestrator.getAgentCount()).toBe(4);
+
+    // setPoolMintForAgents uses instanceof checks which require real class instances.
+    // With jest.mock, the mock constructors return plain objects so instanceof returns false.
+    // This test verifies the method runs without error and covers the iteration logic.
+    // The actual setPoolMint dispatch for each agent type is tested in:
+    //   - tests/liquidity-agent.test.ts (AMM pool integration)
+    //   - tests/trading-agent.test.ts (AMM swap execution)
+    //   - tests/portfolio-agent.test.ts (pool price valuation)
+    expect(() => {
+      orchestrator.setPoolMintForAgents('TestPoolMint999', 'TestPoolAuth999');
+    }).not.toThrow();
   });
 
   // ── Shutdown ─────────────────────────────────────────────────────────────

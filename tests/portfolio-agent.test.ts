@@ -395,4 +395,46 @@ describe('PortfolioAgent', () => {
     await (agent as any).evaluate(action, decision);
     expect((agent as any).pendingOutcomes.length).toBe(1);
   });
+
+  // ── Pool Price Valuation ────────────────────────────────────────────────────
+
+  describe('pool price valuation', () => {
+    it('observe uses pool price for token valuation when pool is configured', async () => {
+      const { agent, wallet } = await buildAgent();
+      const mockGetPoolState = jest.fn().mockResolvedValue({
+        solReserve: 1_000_000_000, // 1 SOL
+        tokenReserve: 200_000,
+        feeBps: 30,
+        authority: 'TestAuth',
+        tokenMint: 'TestMint',
+        bump: 255,
+      });
+      (wallet as any).getPoolState = mockGetPoolState;
+      (wallet as any).getTokenBalances = jest.fn().mockResolvedValue([
+        { mint: 'TestMint', balance: 1000, decimals: 9, symbol: 'SENT', uiBalance: '0.001' },
+      ]);
+      agent.setPoolMint('TestMint', 'TestAuth');
+
+      const obs = await (agent as any).observe();
+      expect(mockGetPoolState).toHaveBeenCalledWith('TestMint', 'TestAuth');
+      // Pool price = 1_000_000_000 / LAMPORTS_PER_SOL / 200_000 = 1 / 200_000 = 0.000005
+      // Token value = 1000 * 0.000005 = 0.005
+      expect(obs.tokenPriceSource).toBe('Pool price');
+    });
+
+    it('observe falls back to 0.001 when getPoolState fails', async () => {
+      const { agent, wallet } = await buildAgent();
+      (wallet as any).getPoolState = jest.fn().mockRejectedValue(new Error('network error'));
+      (wallet as any).getTokenBalances = jest.fn().mockResolvedValue([
+        { mint: 'TestMint', balance: 1000, decimals: 9, symbol: 'SENT', uiBalance: '0.001' },
+      ]);
+      agent.setPoolMint('TestMint', 'TestAuth');
+
+      const obs = await (agent as any).observe();
+      // Should still work with fallback price
+      expect(obs.tokenPriceInSol).toBe(0.001);
+      // Source label is still set since poolMint exists
+      expect(obs.tokenPriceSource).toBe('Pool price');
+    });
+  });
 });

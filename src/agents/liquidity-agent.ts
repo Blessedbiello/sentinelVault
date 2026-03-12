@@ -3,6 +3,7 @@
 // rebalance, add, or remove liquidity based on configurable thresholds.
 
 import { v4 as uuidv4 } from 'uuid';
+import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { BaseAgent } from './base-agent';
 import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
 import { AgenticWallet } from '../core/wallet';
@@ -67,6 +68,8 @@ interface PoolState {
 export class LiquidityAgent extends BaseAgent {
   private pool: PoolState;
   private targetAddress: string;
+  private poolMint: string | null = null;
+  private poolAuthority: string | null = null;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super(config, wallet);
@@ -120,19 +123,45 @@ export class LiquidityAgent extends BaseAgent {
    * that includes pool state, wallet SOL balance, and a timestamp.
    */
   protected async observe(): Promise<Record<string, unknown>> {
-    this.simulatePoolDynamics();
+    // Try real on-chain pool state when pool is configured
+    let usedOnChain = false;
+    if (this.poolMint) {
+      try {
+        const onChainState = await this.wallet.getPoolState(
+          this.poolMint,
+          this.poolAuthority ?? undefined,
+        );
+        if (onChainState && onChainState.solReserve > 0) {
+          const solReserveSol = onChainState.solReserve / LAMPORTS_PER_SOL;
+          const tokenReserve = onChainState.tokenReserve;
+          const poolPrice = tokenReserve > 0 ? solReserveSol / tokenReserve : 0;
+
+          this.pool.tokenABalance = solReserveSol;
+          this.pool.tokenBBalance = tokenReserve;
+          this.pool.price = poolPrice;
+          this.pool.tvl = solReserveSol * 2; // approximate for constant-product
+          this.pool.imbalance = this.pool.tvl > 0
+            ? Math.abs(solReserveSol - tokenReserve * poolPrice) / this.pool.tvl
+            : 0;
+          usedOnChain = true;
+        }
+      } catch {
+        // Pool read failed — fall back to simulation
+      }
+    }
+
+    if (!usedOnChain) {
+      this.simulatePoolDynamics();
+    }
 
     let walletBalanceSol = 0;
     try {
       walletBalanceSol = await this.wallet.getBalance();
     } catch {
-      // If the RPC call fails (e.g. in a test environment) use whatever
-      // balance the wallet state already holds.
       walletBalanceSol = this.wallet.getState()?.balanceSol ?? 0;
     }
 
     return {
-      // Pool snapshot — spread a copy so later mutations do not mutate the obs.
       tokenABalance: this.pool.tokenABalance,
       tokenBBalance: this.pool.tokenBBalance,
       price: this.pool.price,
@@ -141,9 +170,8 @@ export class LiquidityAgent extends BaseAgent {
       utilization: this.pool.utilization,
       imbalance: this.pool.imbalance,
       feesEarned: this.pool.feesEarned,
-      // Wallet context
       walletBalanceSol,
-      // Metadata
+      onChainPool: usedOnChain,
       timestamp: Date.now(),
     };
   }
@@ -238,49 +266,94 @@ export class LiquidityAgent extends BaseAgent {
     try {
       switch (actionType) {
         case 'rebalance': {
-          const signature = await this.wallet.transferSOL(
-            this.targetAddress,
-            REBALANCE_TRANSFER_SOL,
-          );
+          let signature: string;
+          let swapType = 'rebalance';
 
-          // Reduce imbalance by 50% to simulate reserves being equalised
-          this.pool.imbalance = this.pool.imbalance * 0.5;
+          if (this.poolMint) {
+            // Real AMM rebalance: if pool is SOL-heavy, swap SOL for tokens
+            try {
+              const lamports = Math.round(REBALANCE_TRANSFER_SOL * LAMPORTS_PER_SOL);
+              signature = await this.wallet.swapSolForToken(
+                this.poolMint,
+                lamports,
+                0,
+                this.poolAuthority ?? undefined,
+              );
+              swapType = 'rebalance:swap_sol_for_token';
+            } catch {
+              // Fall back to transferSOL
+              signature = await this.wallet.transferSOL(
+                this.targetAddress,
+                REBALANCE_TRANSFER_SOL,
+              );
+              this.pool.imbalance = this.pool.imbalance * 0.5;
+            }
+          } else {
+            signature = await this.wallet.transferSOL(
+              this.targetAddress,
+              REBALANCE_TRANSFER_SOL,
+            );
+            this.pool.imbalance = this.pool.imbalance * 0.5;
+          }
 
           return {
             id: uuidv4(),
             agentId: this.config.id,
             timestamp: Date.now(),
-            type: 'rebalance',
+            type: swapType,
             details: {
               amountSol: REBALANCE_TRANSFER_SOL,
               destination: this.targetAddress,
               signature,
               newImbalance: this.pool.imbalance,
               tvl: this.pool.tvl,
+              poolMint: this.poolMint,
             },
           };
         }
 
         case 'add_liquidity': {
-          const signature = await this.wallet.transferSOL(
-            this.targetAddress,
-            ADD_LIQUIDITY_TRANSFER_SOL,
-          );
+          let signature: string;
+          let liquidityType = 'add_liquidity';
 
-          // Reflect added SOL in the pool's tokenA balance
-          this.pool.tokenABalance += ADD_LIQUIDITY_TRANSFER_SOL;
+          if (this.poolMint) {
+            // Execute a swap (since addLiquidity is authority-only)
+            try {
+              const lamports = Math.round(ADD_LIQUIDITY_TRANSFER_SOL * LAMPORTS_PER_SOL);
+              signature = await this.wallet.swapSolForToken(
+                this.poolMint,
+                lamports,
+                0,
+                this.poolAuthority ?? undefined,
+              );
+              liquidityType = 'add_liquidity:swap_sol_for_token';
+            } catch {
+              signature = await this.wallet.transferSOL(
+                this.targetAddress,
+                ADD_LIQUIDITY_TRANSFER_SOL,
+              );
+              this.pool.tokenABalance += ADD_LIQUIDITY_TRANSFER_SOL;
+            }
+          } else {
+            signature = await this.wallet.transferSOL(
+              this.targetAddress,
+              ADD_LIQUIDITY_TRANSFER_SOL,
+            );
+            this.pool.tokenABalance += ADD_LIQUIDITY_TRANSFER_SOL;
+          }
 
           return {
             id: uuidv4(),
             agentId: this.config.id,
             timestamp: Date.now(),
-            type: 'add_liquidity',
+            type: liquidityType,
             details: {
               amountSol: ADD_LIQUIDITY_TRANSFER_SOL,
               destination: this.targetAddress,
               signature,
               newTokenABalance: this.pool.tokenABalance,
               tvl: this.pool.tvl,
+              poolMint: this.poolMint,
             },
           };
         }
@@ -372,6 +445,12 @@ export class LiquidityAgent extends BaseAgent {
   /** Update the destination address (e.g. for agent-to-agent wiring). */
   setTargetAddress(address: string): void {
     this.targetAddress = address;
+  }
+
+  /** Set the pool mint (and optional authority) for real AMM operations. */
+  setPoolMint(mint: string, authority?: string): void {
+    this.poolMint = mint;
+    this.poolAuthority = authority ?? null;
   }
 
   // ── Policy Engine Integration ──────────────────────────────────────────────

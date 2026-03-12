@@ -102,13 +102,24 @@ export class PortfolioAgent extends BaseAgent {
       solBalance = this.wallet.getState()?.balanceSol ?? 0;
     }
 
-    // Fetch token balances
+    // Fetch token balances with real pool price when available
     let tokenValueSol = 0;
+    let tokenPriceInSol = 0.001; // conservative fallback
+    if (this.poolMint) {
+      try {
+        const poolState = await this.wallet.getPoolState(this.poolMint, this.poolAuthority ?? undefined);
+        if (poolState && poolState.tokenReserve > 0) {
+          tokenPriceInSol = poolState.solReserve / poolState.tokenReserve;
+        }
+      } catch {
+        // Pool read failed — use fallback
+      }
+    }
+
     try {
       const tokenBalances = await this.wallet.getTokenBalances();
-      // Estimate token value in SOL terms (simplified: sum of raw balances as SOL equivalent)
       for (const tb of tokenBalances) {
-        tokenValueSol += tb.balance * 0.001; // Simplified conversion
+        tokenValueSol += tb.balance * tokenPriceInSol;
       }
     } catch {
       // No tokens or method unavailable
@@ -136,6 +147,8 @@ export class PortfolioAgent extends BaseAgent {
       targetAllocation: { ...this.targetAllocation },
       drift: this.drift,
       price,
+      tokenPriceInSol: tokenPriceInSol,
+      tokenPriceSource: this.poolMint ? 'Pool price' : 'Fallback',
       timestamp: Date.now(),
     };
   }
@@ -148,9 +161,13 @@ export class PortfolioAgent extends BaseAgent {
     const targetAlloc = observations.targetAllocation as TargetAllocation;
     const solBalance = observations.solBalance as number;
 
+    const tokenPriceSrc = observations.tokenPriceSource as string | undefined;
+    const tokenPriceVal = observations.tokenPriceInSol as number | undefined;
+
     const reasoningChain: string[] = [
       `[Portfolio]  SOL=${(currentAlloc.sol * 100).toFixed(1)}% Tokens=${(currentAlloc.tokens * 100).toFixed(1)}%`,
       `[Target]     SOL=${(targetAlloc.sol * 100).toFixed(1)}% Tokens=${(targetAlloc.tokens * 100).toFixed(1)}%`,
+      `[Valuation]  ${tokenPriceSrc ?? 'Fallback'}: ${(tokenPriceVal ?? 0.001).toFixed(6)} SOL/token`,
       `[Drift]      ${(drift * 100).toFixed(1)}% (threshold: ${(REBALANCE_THRESHOLD * 100).toFixed(1)}%)`,
     ];
 

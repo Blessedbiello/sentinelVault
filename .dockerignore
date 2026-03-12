@@ -1,0 +1,38 @@
+# Build artifacts
+dist/
+node_modules/
+
+# Runtime data (keystores, audit logs — never bake secrets into image)
+.sentinelvault/
+
+# Anchor / Rust build artifacts
+target/
+programs/target/
+programs/.anchor/
+.anchor/
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# Test outputs
+coverage/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+npm-debug.log*
+
+# Solana CLI keypair — never ship deployer keys in the image
+~/.config/solana/

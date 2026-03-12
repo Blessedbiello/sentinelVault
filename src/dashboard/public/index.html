@@ -23,11 +23,23 @@
       justify-content: space-between;
     }
 
+    .header-left {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
     .header h1 {
       font-size: 18px;
       color: #00d4aa;
       font-weight: 700;
       letter-spacing: 1px;
+    }
+
+    .header .tagline {
+      font-size: 11px;
+      color: #556677;
+      letter-spacing: 0.5px;
     }
 
     .header .status {
@@ -45,7 +57,15 @@
       background: #ff4444;
     }
 
-    .status-dot.connected { background: #00d4aa; }
+    .status-dot.connected {
+      background: #00d4aa;
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0, 212, 170, 0.4); }
+      50% { box-shadow: 0 0 0 4px rgba(0, 212, 170, 0); }
+    }
 
     .metrics-bar {
       background: #0f1923;
@@ -75,6 +95,96 @@
       font-weight: 600;
     }
 
+    .metric-value.secondary { color: #00aaff; }
+    .metric-value.tertiary { color: #aa44ff; }
+
+    /* ── Pool State Panel ──────────────────────────────────────────────── */
+
+    .pool-panel {
+      background: #0f1923;
+      border-bottom: 1px solid #1e2d3d;
+      padding: 12px 24px;
+      display: none;
+    }
+
+    .pool-panel.visible { display: block; }
+
+    .pool-panel h3 {
+      font-size: 11px;
+      color: #556677;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+
+    .pool-grid {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .pool-stat {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .pool-stat-label {
+      font-size: 10px;
+      color: #556677;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .pool-stat-value {
+      font-size: 14px;
+      color: #00d4aa;
+      font-weight: 600;
+    }
+
+    .pool-reserves {
+      flex: 1;
+      min-width: 200px;
+      max-width: 400px;
+    }
+
+    .reserve-bar-container {
+      margin-top: 4px;
+    }
+
+    .reserve-bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #8899aa;
+      margin-bottom: 2px;
+    }
+
+    .reserve-bar-track {
+      height: 8px;
+      background: #1a2332;
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex;
+    }
+
+    .reserve-bar-sol {
+      height: 100%;
+      background: #00d4aa;
+      border-radius: 4px 0 0 4px;
+      transition: width 0.5s ease;
+    }
+
+    .reserve-bar-token {
+      height: 100%;
+      background: #aa44ff;
+      border-radius: 0 4px 4px 0;
+      transition: width 0.5s ease;
+    }
+
+    /* ── Main Layout ───────────────────────────────────────────────────── */
+
     .main {
       display: grid;
       grid-template-columns: 1fr 380px;
@@ -97,20 +207,31 @@
 
     .agent-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 16px;
     }
+
+    /* ── Agent Card ─────────────────────────────────────────────────────── */
 
     .agent-card {
       background: #111a27;
       border: 1px solid #1e2d3d;
       border-radius: 8px;
       padding: 16px;
-      transition: border-color 0.2s;
+      transition: border-color 0.3s, box-shadow 0.3s;
     }
 
     .agent-card:hover {
       border-color: #00d4aa44;
+    }
+
+    .agent-card.updated {
+      animation: card-glow 0.6s ease-out;
+    }
+
+    @keyframes card-glow {
+      0% { box-shadow: 0 0 8px rgba(0, 212, 170, 0.3); border-color: #00d4aa66; }
+      100% { box-shadow: 0 0 0 rgba(0, 212, 170, 0); border-color: #1e2d3d; }
     }
 
     .agent-header {
@@ -124,6 +245,9 @@
       font-size: 14px;
       font-weight: 600;
       color: #e0e6ed;
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
 
     .agent-type {
@@ -132,6 +256,22 @@
       padding: 2px 8px;
       background: #1a2332;
       border-radius: 4px;
+    }
+
+    .executing-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #aa44ff;
+      display: none;
+      animation: pulse-executing 1s ease-in-out infinite;
+    }
+
+    .executing-dot.active { display: inline-block; }
+
+    @keyframes pulse-executing {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(170, 68, 255, 0.5); }
+      50% { opacity: 0.6; box-shadow: 0 0 0 4px rgba(170, 68, 255, 0); }
     }
 
     .status-badge {
@@ -145,10 +285,19 @@
 
     .status-badge.idle { background: #00d4aa22; color: #00d4aa; }
     .status-badge.analyzing { background: #00aaff22; color: #00aaff; }
-    .status-badge.executing { background: #aa44ff22; color: #aa44ff; }
+    .status-badge.executing {
+      background: #aa44ff22;
+      color: #aa44ff;
+      animation: pulse-badge 1.5s ease-in-out infinite;
+    }
     .status-badge.paused { background: #ffaa0022; color: #ffaa00; }
     .status-badge.error { background: #ff444422; color: #ff4444; }
     .status-badge.stopped { background: #33445522; color: #556677; }
+
+    @keyframes pulse-badge {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(170, 68, 255, 0.3); }
+      50% { box-shadow: 0 0 0 4px rgba(170, 68, 255, 0); }
+    }
 
     .agent-stats {
       display: grid;
@@ -166,6 +315,23 @@
     .stat-label { color: #556677; }
     .stat-value { color: #aabbcc; font-weight: 500; }
     .stat-value.sol { color: #00d4aa; }
+
+    .sparkline {
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1;
+      color: #00d4aa;
+      letter-spacing: 1px;
+      overflow: hidden;
+      white-space: nowrap;
+      font-family: monospace;
+    }
+
+    .sparkline-label {
+      font-size: 10px;
+      color: #556677;
+      margin-bottom: 2px;
+    }
 
     .agent-wallet {
       margin-top: 10px;
@@ -277,6 +443,8 @@
 
     .integration-pill.active { color: #00d4aa; background: #00d4aa15; }
 
+    /* ── Activity Panel ─────────────────────────────────────────────────── */
+
     .activity-panel {
       background: #0c1219;
       border-left: 1px solid #1e2d3d;
@@ -285,13 +453,43 @@
       flex-direction: column;
     }
 
-    .activity-panel h2 {
-      font-size: 14px;
-      color: #8899aa;
+    .activity-tabs {
+      display: flex;
+      gap: 0;
       margin-bottom: 16px;
+    }
+
+    .activity-tab {
+      font-size: 12px;
+      color: #556677;
       text-transform: uppercase;
       letter-spacing: 1px;
+      cursor: pointer;
+      border: none;
+      background: none;
+      padding: 6px 14px;
+      font-family: inherit;
+      font-weight: 600;
+      border-bottom: 2px solid transparent;
+      transition: color 0.2s, border-color 0.2s;
     }
+
+    .activity-tab.active {
+      color: #00d4aa;
+      border-bottom-color: #00d4aa;
+    }
+
+    .activity-tab:hover {
+      color: #8899aa;
+    }
+
+    .tab-content {
+      flex: 1;
+      overflow-y: auto;
+      display: none;
+    }
+
+    .tab-content.active { display: flex; flex-direction: column; }
 
     .activity-feed {
       flex: 1;
@@ -326,6 +524,78 @@
       font-size: 11px;
     }
 
+    /* ── Transaction History ────────────────────────────────────────────── */
+
+    .tx-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .tx-item {
+      background: #111a27;
+      border: 1px solid #1a2332;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .tx-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .tx-type {
+      font-weight: 600;
+      font-size: 10px;
+      text-transform: uppercase;
+      padding: 1px 6px;
+      border-radius: 3px;
+      letter-spacing: 0.5px;
+    }
+
+    .tx-type.swap { background: #00d4aa22; color: #00d4aa; }
+    .tx-type.buy { background: #00d4aa22; color: #00d4aa; }
+    .tx-type.transfer { background: #00aaff22; color: #00aaff; }
+    .tx-type.sell { background: #ff444422; color: #ff4444; }
+    .tx-type.memo { background: #00aaff22; color: #00aaff; }
+    .tx-type.stake { background: #ffaa0022; color: #ffaa00; }
+    .tx-type.unknown { background: #33445522; color: #778899; }
+
+    .tx-agent {
+      color: #8899aa;
+      font-size: 10px;
+    }
+
+    .tx-amount {
+      color: #e0e6ed;
+      font-weight: 500;
+    }
+
+    .tx-time {
+      color: #445566;
+      font-size: 10px;
+    }
+
+    .tx-sig {
+      font-size: 10px;
+    }
+
+    .tx-sig a {
+      color: #556677;
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    .tx-sig a:hover {
+      color: #00aaff;
+      text-decoration: underline;
+    }
+
     .empty-state {
       color: #334455;
       font-style: italic;
@@ -333,16 +603,37 @@
       padding: 40px 20px;
     }
 
+    /* ── Responsive ─────────────────────────────────────────────────────── */
+
+    @media (max-width: 1100px) {
+      .agent-grid {
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      }
+    }
+
     @media (max-width: 900px) {
       .main { grid-template-columns: 1fr; }
-      .activity-panel { border-left: none; border-top: 1px solid #1e2d3d; }
+      .activity-panel { border-left: none; border-top: 1px solid #1e2d3d; max-height: 400px; }
+      .metrics-bar { gap: 16px; }
+      .pool-grid { gap: 16px; }
+    }
+
+    @media (max-width: 600px) {
+      .header { padding: 12px 16px; }
+      .metrics-bar { padding: 10px 16px; gap: 12px; }
+      .agents-panel { padding: 16px; }
+      .agent-grid { grid-template-columns: 1fr; }
+      .pool-panel { padding: 10px 16px; }
     }
   </style>
 </head>
 <body>
 
   <div class="header">
-    <h1>SENTINELVAULT</h1>
+    <div class="header-left">
+      <h1>SENTINELVAULT</h1>
+      <span class="tagline">Autonomous AI Agent Wallet Framework</span>
+    </div>
     <div class="status">
       <div class="status-dot" id="ws-status"></div>
       <span id="ws-label">Connecting...</span>
@@ -370,6 +661,52 @@
       <span class="metric-label">Memory</span>
       <span class="metric-value" id="m-memory">0.0 MB</span>
     </div>
+    <div class="metric">
+      <span class="metric-label">SOL Price</span>
+      <span class="metric-value secondary" id="m-sol-price">--</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Pool Price</span>
+      <span class="metric-value tertiary" id="m-pool-price">--</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">Pool TVL</span>
+      <span class="metric-value tertiary" id="m-pool-tvl">--</span>
+    </div>
+  </div>
+
+  <div class="pool-panel" id="pool-panel">
+    <h3>AMM Pool State</h3>
+    <div class="pool-grid">
+      <div class="pool-stat">
+        <span class="pool-stat-label">SOL Reserve</span>
+        <span class="pool-stat-value" id="pool-sol">0.0000</span>
+      </div>
+      <div class="pool-stat">
+        <span class="pool-stat-label">Token Reserve</span>
+        <span class="pool-stat-value" id="pool-token">0.0000</span>
+      </div>
+      <div class="pool-stat">
+        <span class="pool-stat-label">Price (SOL/Token)</span>
+        <span class="pool-stat-value" id="pool-price">--</span>
+      </div>
+      <div class="pool-stat">
+        <span class="pool-stat-label">TVL</span>
+        <span class="pool-stat-value" id="pool-tvl">--</span>
+      </div>
+      <div class="pool-reserves">
+        <div class="reserve-bar-container">
+          <div class="reserve-bar-label">
+            <span id="reserve-sol-label">SOL: 0%</span>
+            <span id="reserve-token-label">Token: 0%</span>
+          </div>
+          <div class="reserve-bar-track">
+            <div class="reserve-bar-sol" id="reserve-bar-sol" style="width:50%"></div>
+            <div class="reserve-bar-token" id="reserve-bar-token" style="width:50%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="main">
@@ -381,29 +718,88 @@
     </div>
 
     <div class="activity-panel">
-      <h2>Live Activity</h2>
-      <div class="activity-feed" id="activity-feed">
-        <div class="empty-state">Waiting for events...</div>
+      <div class="activity-tabs">
+        <button class="activity-tab active" onclick="switchTab('activity')">Live Activity</button>
+        <button class="activity-tab" onclick="switchTab('transactions')">Transactions</button>
+      </div>
+
+      <div class="tab-content active" id="tab-activity">
+        <div class="activity-feed" id="activity-feed">
+          <div class="empty-state">Waiting for events...</div>
+        </div>
+      </div>
+
+      <div class="tab-content" id="tab-transactions">
+        <div class="tx-list" id="tx-list">
+          <div class="empty-state">No transactions yet...</div>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
     const MAX_ACTIVITY = 50;
+    const MAX_TRANSACTIONS = 20;
+    const SPARKLINE_CHARS = ['\u2581','\u2582','\u2583','\u2584','\u2585','\u2586','\u2587','\u2588'];
     let activities = [];
+    let transactions = [];
     let agentsData = [];
     let metricsData = null;
+    let poolData = null;
+    let previousAgentIds = new Set();
 
-    // ── WebSocket ──────────────────────────────────────────────────────────
+    // ── Tab Switching ────────────────────────────────────────────────────
+
+    function switchTab(tabName) {
+      document.querySelectorAll('.activity-tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+      if (tabName === 'activity') {
+        document.querySelectorAll('.activity-tab')[0].classList.add('active');
+        document.getElementById('tab-activity').classList.add('active');
+      } else {
+        document.querySelectorAll('.activity-tab')[1].classList.add('active');
+        document.getElementById('tab-transactions').classList.add('active');
+      }
+    }
+
+    // ── Sparkline ────────────────────────────────────────────────────────
+
+    function makeSparkline(values) {
+      if (!values || values.length < 2) return '';
+      var min = Math.min.apply(null, values);
+      var max = Math.max.apply(null, values);
+      var range = max - min;
+      if (range === 0) return SPARKLINE_CHARS[3].repeat(values.length);
+      return values.map(function(v) {
+        var idx = Math.round(((v - min) / range) * 7);
+        return SPARKLINE_CHARS[Math.min(idx, 7)];
+      }).join('');
+    }
+
+    // ── WebSocket ────────────────────────────────────────────────────────
 
     let reconnectDelay = 1000;
     let reconnectAttempts = 0;
     const MAX_RECONNECT_DELAY = 30000;
 
-    function connect() {
-      const ws = new WebSocket('ws://' + location.hostname + ':3001');
+    // Determine WebSocket URL: same-port for Fly.io/singlePort, port 3001 for local two-port mode
+    var wsPortOverride = null;
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+      // Local dev: try port 3001 (two-port mode) unless already on a non-3000 port (singlePort)
+      if (location.port === '3000') {
+        wsPortOverride = '3001';
+      }
+    }
 
-      ws.onopen = () => {
+    function connect() {
+      const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsHost = wsPortOverride
+        ? location.hostname + ':' + wsPortOverride
+        : location.host;
+      const wsUrl = wsProtocol + '//' + wsHost;
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = function() {
         reconnectDelay = 1000;
         reconnectAttempts = 0;
         document.getElementById('ws-status').classList.add('connected');
@@ -411,24 +807,24 @@
         addActivity('system', 'WebSocket connected', '');
       };
 
-      ws.onclose = () => {
+      ws.onclose = function() {
         reconnectAttempts++;
         document.getElementById('ws-status').classList.remove('connected');
-        const jitter = Math.floor(Math.random() * 1000) - 500;
-        const delay = Math.min(reconnectDelay + jitter, MAX_RECONNECT_DELAY);
+        var jitter = Math.floor(Math.random() * 1000) - 500;
+        var delay = Math.min(reconnectDelay + jitter, MAX_RECONNECT_DELAY);
         document.getElementById('ws-label').textContent = 'Reconnecting (attempt ' + reconnectAttempts + ')...';
         addActivity('system', 'WebSocket disconnected', 'Reconnecting in ' + Math.round(delay / 1000) + 's (attempt ' + reconnectAttempts + ')...');
         setTimeout(connect, delay);
         reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
       };
 
-      ws.onerror = (e) => {
+      ws.onerror = function() {
         addActivity('system', 'WebSocket error', 'Connection error occurred');
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = function(event) {
         try {
-          const msg = JSON.parse(event.data);
+          var msg = JSON.parse(event.data);
           handleMessage(msg);
         } catch (e) {
           addActivity('system', 'WebSocket parse error', 'Failed to parse message');
@@ -447,172 +843,359 @@
           renderMetrics();
           break;
         case 'agent:created':
-          addActivity('agent:created', `Agent "${msg.data.name}" created`, `Type: ${msg.data.type}`);
+          addActivity('agent:created', 'Agent "' + msg.data.name + '" created', 'Type: ' + msg.data.type);
           fetchDashboard();
           break;
         case 'agent:started':
-          addActivity('agent:started', `Agent started`, `ID: ${msg.data.agentId.slice(0,8)}...`);
+          addActivity('agent:started', 'Agent started', 'ID: ' + msg.data.agentId.slice(0,8) + '...');
           fetchDashboard();
           break;
         case 'agent:stopped':
-          addActivity('agent:stopped', `Agent stopped`, `ID: ${msg.data.agentId.slice(0,8)}...`);
+          addActivity('agent:stopped', 'Agent stopped', 'ID: ' + msg.data.agentId.slice(0,8) + '...');
           fetchDashboard();
           break;
         case 'alert':
           addActivity('alert:' + msg.data.severity, msg.data.message.slice(0, 100), '');
+          break;
+        case 'pool:updated':
+          poolData = msg.data;
+          renderPool();
+          break;
+        case 'transaction:executed':
+          addTransaction(msg.data);
+          addActivity('transaction', formatTxActivity(msg.data), '');
           break;
         default:
           addActivity(msg.event, JSON.stringify(msg.data).slice(0, 80), '');
       }
     }
 
-    // ── REST fallback ──────────────────────────────────────────────────────
+    // ── REST fallback ────────────────────────────────────────────────────
 
     async function fetchDashboard() {
       try {
-        const res = await fetch('/api/dashboard');
-        const data = await res.json();
+        var res = await fetch('/api/dashboard');
+        var data = await res.json();
         if (data.agents) { agentsData = data.agents; renderAgents(); }
         if (data.systemMetrics) { metricsData = data.systemMetrics; renderMetrics(); }
       } catch (e) {}
     }
 
-    // ── Rendering ──────────────────────────────────────────────────────────
+    async function fetchPool() {
+      try {
+        var res = await fetch('/api/pool');
+        var data = await res.json();
+        if (data && !data.status) {
+          poolData = data;
+          renderPool();
+        }
+      } catch (e) {}
+    }
+
+    async function fetchTransactions() {
+      try {
+        var res = await fetch('/api/transactions');
+        var data = await res.json();
+        if (Array.isArray(data)) {
+          transactions = data.slice(0, MAX_TRANSACTIONS);
+          renderTransactions();
+        }
+      } catch (e) {}
+    }
+
+    // ── Rendering ────────────────────────────────────────────────────────
 
     function renderMetrics() {
       if (!metricsData) return;
-      const m = metricsData;
-      document.getElementById('m-agents').textContent = `${m.activeAgents} / ${m.totalAgents}`;
+      var m = metricsData;
+      document.getElementById('m-agents').textContent = m.activeAgents + ' / ' + m.totalAgents;
       document.getElementById('m-txns').textContent = m.totalTransactions;
       document.getElementById('m-volume').textContent = m.totalVolumeSol.toFixed(4) + ' SOL';
-      const mins = Math.floor(m.uptimeSeconds / 60);
-      const secs = Math.floor(m.uptimeSeconds % 60);
-      document.getElementById('m-uptime').textContent = `${mins}m ${secs}s`;
+      var mins = Math.floor(m.uptimeSeconds / 60);
+      var secs = Math.floor(m.uptimeSeconds % 60);
+      document.getElementById('m-uptime').textContent = mins + 'm ' + secs + 's';
       document.getElementById('m-memory').textContent = m.memoryUsageMb.toFixed(1) + ' MB';
+
+      // SOL price from agent data
+      var solPrice = extractSolPrice();
+      document.getElementById('m-sol-price').textContent = solPrice ? ('$' + solPrice.toFixed(2)) : '--';
+
+      // Pool metrics in metrics bar
+      if (poolData) {
+        var pp = computePoolPrice();
+        document.getElementById('m-pool-price').textContent = pp ? pp.toFixed(6) : '--';
+        var tvl = computePoolTvl();
+        document.getElementById('m-pool-tvl').textContent = tvl ? (tvl.toFixed(2) + ' SOL') : '--';
+      }
+    }
+
+    function extractSolPrice() {
+      for (var i = 0; i < agentsData.length; i++) {
+        var ld = agentsData[i].lastDecision;
+        if (ld && ld.marketConditions && ld.marketConditions.price) {
+          return ld.marketConditions.price;
+        }
+      }
+      return null;
+    }
+
+    function computePoolPrice() {
+      if (!poolData) return null;
+      var sol = poolData.solReserve || poolData.sol_reserve || 0;
+      var token = poolData.tokenReserve || poolData.token_reserve || 0;
+      if (token === 0) return null;
+      return sol / token;
+    }
+
+    function computePoolTvl() {
+      if (!poolData) return null;
+      var sol = poolData.solReserve || poolData.sol_reserve || 0;
+      // TVL is 2x SOL reserve (for balanced pool)
+      return sol * 2;
+    }
+
+    function renderPool() {
+      var panel = document.getElementById('pool-panel');
+      if (!poolData) {
+        panel.classList.remove('visible');
+        return;
+      }
+      panel.classList.add('visible');
+
+      var sol = poolData.solReserve || poolData.sol_reserve || 0;
+      var token = poolData.tokenReserve || poolData.token_reserve || 0;
+
+      document.getElementById('pool-sol').textContent = (sol / 1e9).toFixed(4) + ' SOL';
+      document.getElementById('pool-token').textContent = (token / 1e9).toFixed(4);
+
+      var price = computePoolPrice();
+      document.getElementById('pool-price').textContent = price ? price.toFixed(6) : '--';
+
+      var tvlVal = sol > 0 ? ((sol / 1e9) * 2).toFixed(4) + ' SOL' : '--';
+      document.getElementById('pool-tvl').textContent = tvlVal;
+
+      // Reserve bars
+      var total = sol + token;
+      if (total > 0) {
+        var solPct = ((sol / total) * 100).toFixed(0);
+        var tokenPct = ((token / total) * 100).toFixed(0);
+        document.getElementById('reserve-bar-sol').style.width = solPct + '%';
+        document.getElementById('reserve-bar-token').style.width = tokenPct + '%';
+        document.getElementById('reserve-sol-label').textContent = 'SOL: ' + solPct + '%';
+        document.getElementById('reserve-token-label').textContent = 'Token: ' + tokenPct + '%';
+      }
+
+      // Update metrics bar pool values
+      document.getElementById('m-pool-price').textContent = price ? price.toFixed(6) : '--';
+      document.getElementById('m-pool-tvl').textContent = sol > 0 ? ((sol / 1e9) * 2).toFixed(4) + ' SOL' : '--';
     }
 
     function renderAgents() {
-      const grid = document.getElementById('agent-grid');
+      var grid = document.getElementById('agent-grid');
       if (!agentsData.length) {
         grid.innerHTML = '<div class="empty-state">No agents registered</div>';
         return;
       }
 
-      grid.innerHTML = agentsData.map((agent, idx) => {
-        const w = agent.wallet || {};
-        const p = agent.performance || {};
-        const pubkey = w.publicKey || 'N/A';
-        const shortKey = pubkey.length > 20 ? pubkey.slice(0, 8) + '...' + pubkey.slice(-4) : pubkey;
-        const tokenCount = (w.tokenBalances || []).length;
-        const tokenInfo = tokenCount > 0
-          ? (w.tokenBalances || []).map(t => `${t.uiBalance} ${t.symbol}`).join(', ')
+      var currentIds = new Set(agentsData.map(function(a) { return a.id || a.name; }));
+
+      grid.innerHTML = agentsData.map(function(agent, idx) {
+        var w = agent.wallet || {};
+        var p = agent.performance || {};
+        var pubkey = w.publicKey || 'N/A';
+        var shortKey = pubkey.length > 20 ? pubkey.slice(0, 8) + '...' + pubkey.slice(-4) : pubkey;
+        var tokenCount = (w.tokenBalances || []).length;
+        var tokenInfo = tokenCount > 0
+          ? (w.tokenBalances || []).map(function(t) { return t.uiBalance + ' ' + t.symbol; }).join(', ')
           : 'None';
 
-        const lastDecision = agent.lastDecision;
-        const decisionInfo = lastDecision
-          ? `${lastDecision.action} (${(lastDecision.confidence * 100).toFixed(0)}%)`
+        var lastDecision = agent.lastDecision;
+        var decisionInfo = lastDecision
+          ? lastDecision.action + ' (' + (lastDecision.confidence * 100).toFixed(0) + '%)'
           : 'None';
 
         // Adaptive learning data
-        const aw = agent.adaptiveWeights || { trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 };
-        const regime = agent.marketRegime || 'quiet';
+        var aw = agent.adaptiveWeights || { trend: 0.4, momentum: 0.3, volatility: 0.2, balance: 0.1 };
+        var regime = agent.marketRegime || 'quiet';
 
         // Reasoning chain from last decision
-        const chain = lastDecision && lastDecision.marketConditions
+        var chain = lastDecision && lastDecision.marketConditions
           ? (lastDecision.marketConditions.reasoningChain || [])
           : [];
 
+        // Price history for sparkline
+        var priceHistory = lastDecision && lastDecision.marketConditions
+          ? (lastDecision.marketConditions.priceHistory || [])
+          : [];
+        var sparkline = makeSparkline(priceHistory);
+
         // Integration status
-        const priceSource = lastDecision && lastDecision.marketConditions
+        var priceSource = lastDecision && lastDecision.marketConditions
           ? lastDecision.marketConditions.priceSource : null;
-        const hasJupiter = lastDecision && lastDecision.marketConditions
+        var hasJupiter = lastDecision && lastDecision.marketConditions
           ? !!lastDecision.marketConditions.jupiterQuote : false;
-        const hasAI = lastDecision && lastDecision.marketConditions
+        var hasAI = lastDecision && lastDecision.marketConditions
           ? !!lastDecision.marketConditions.aiRecommendation : false;
 
-        const cardId = 'reasoning-' + idx;
+        var cardId = 'reasoning-' + idx;
+        var isExecuting = agent.status === 'executing';
+        var agentKey = agent.id || agent.name;
+        var isUpdated = previousAgentIds.has(agentKey);
 
-        return `
-          <div class="agent-card">
-            <div class="agent-header">
-              <div>
-                <div class="agent-name">${agent.name}
-                  <span class="regime-badge ${regime}">${regime}</span>
-                </div>
-                <span class="agent-type">${agent.type}</span>
-              </div>
-              <span class="status-badge ${agent.status}">${agent.status}</span>
-            </div>
-            <div class="agent-stats">
-              <div class="stat"><span class="stat-label">SOL</span><span class="stat-value sol">${(w.balanceSol || 0).toFixed(4)}</span></div>
-              <div class="stat"><span class="stat-label">Tokens</span><span class="stat-value">${tokenInfo}</span></div>
-              <div class="stat"><span class="stat-label">Decisions</span><span class="stat-value">${decisionInfo}</span></div>
-              <div class="stat"><span class="stat-label">Txns</span><span class="stat-value">${p.totalTransactions || 0}</span></div>
-              <div class="stat"><span class="stat-label">Volume</span><span class="stat-value sol">${(p.totalVolumeSol || 0).toFixed(4)}</span></div>
-              <div class="stat"><span class="stat-label">Win Rate</span><span class="stat-value">${((p.winRate || 0) * 100).toFixed(0)}%</span></div>
-            </div>
-            <div class="weight-bars">
-              <div class="weight-bar-row">
-                <span class="weight-bar-label">trend</span>
-                <div class="weight-bar-track"><div class="weight-bar-fill trend" style="width:${(aw.trend*100).toFixed(0)}%"></div></div>
-                <span class="weight-bar-pct">${(aw.trend*100).toFixed(0)}%</span>
-              </div>
-              <div class="weight-bar-row">
-                <span class="weight-bar-label">mom</span>
-                <div class="weight-bar-track"><div class="weight-bar-fill momentum" style="width:${(aw.momentum*100).toFixed(0)}%"></div></div>
-                <span class="weight-bar-pct">${(aw.momentum*100).toFixed(0)}%</span>
-              </div>
-              <div class="weight-bar-row">
-                <span class="weight-bar-label">vol</span>
-                <div class="weight-bar-track"><div class="weight-bar-fill volatility" style="width:${(aw.volatility*100).toFixed(0)}%"></div></div>
-                <span class="weight-bar-pct">${(aw.volatility*100).toFixed(0)}%</span>
-              </div>
-              <div class="weight-bar-row">
-                <span class="weight-bar-label">bal</span>
-                <div class="weight-bar-track"><div class="weight-bar-fill balance" style="width:${(aw.balance*100).toFixed(0)}%"></div></div>
-                <span class="weight-bar-pct">${(aw.balance*100).toFixed(0)}%</span>
-              </div>
-            </div>
-            <div class="integration-row">
-              <span class="integration-pill ${priceSource && priceSource !== 'simulated' ? 'active' : ''}">${priceSource || 'no price'}</span>
-              <span class="integration-pill ${hasJupiter ? 'active' : ''}">Jupiter ${hasJupiter ? '\\u2713' : '\\u2717'}</span>
-              <span class="integration-pill ${hasAI ? 'active' : ''}">AI ${hasAI ? '\\u2713' : '\\u2717'}</span>
-            </div>
-            ${chain.length > 0 ? `
-              <div class="reasoning-section">
-                <button class="reasoning-toggle" onclick="document.getElementById('${cardId}').style.display = document.getElementById('${cardId}').style.display === 'none' ? 'block' : 'none'">Reasoning Chain</button>
-                <div class="reasoning-chain" id="${cardId}" style="display:none">${chain.map(l => l.replace(/</g, '&lt;')).join('<br>')}</div>
-              </div>
-            ` : ''}
-            <div class="agent-wallet">${shortKey}</div>
-          </div>
-        `;
+        return '<div class="agent-card' + (isUpdated ? ' updated' : '') + '">' +
+          '<div class="agent-header">' +
+            '<div>' +
+              '<div class="agent-name">' +
+                '<span class="executing-dot' + (isExecuting ? ' active' : '') + '"></span>' +
+                agent.name +
+                '<span class="regime-badge ' + regime + '">' + regime + '</span>' +
+              '</div>' +
+              '<span class="agent-type">' + agent.type + '</span>' +
+            '</div>' +
+            '<span class="status-badge ' + agent.status + '">' + agent.status + '</span>' +
+          '</div>' +
+          '<div class="agent-stats">' +
+            '<div class="stat"><span class="stat-label">SOL</span><span class="stat-value sol">' + (w.balanceSol || 0).toFixed(4) + '</span></div>' +
+            '<div class="stat"><span class="stat-label">Tokens</span><span class="stat-value">' + tokenInfo + '</span></div>' +
+            '<div class="stat"><span class="stat-label">Decisions</span><span class="stat-value">' + decisionInfo + '</span></div>' +
+            '<div class="stat"><span class="stat-label">Txns</span><span class="stat-value">' + (p.totalTransactions || 0) + '</span></div>' +
+            '<div class="stat"><span class="stat-label">Volume</span><span class="stat-value sol">' + (p.totalVolumeSol || 0).toFixed(4) + '</span></div>' +
+            '<div class="stat"><span class="stat-label">Win Rate</span><span class="stat-value">' + ((p.winRate || 0) * 100).toFixed(0) + '%</span></div>' +
+          '</div>' +
+          (sparkline ? (
+            '<div class="sparkline">' +
+              '<div class="sparkline-label">Price History</div>' +
+              sparkline +
+            '</div>'
+          ) : '') +
+          '<div class="weight-bars">' +
+            '<div class="weight-bar-row">' +
+              '<span class="weight-bar-label">trend</span>' +
+              '<div class="weight-bar-track"><div class="weight-bar-fill trend" style="width:' + (aw.trend*100).toFixed(0) + '%"></div></div>' +
+              '<span class="weight-bar-pct">' + (aw.trend*100).toFixed(0) + '%</span>' +
+            '</div>' +
+            '<div class="weight-bar-row">' +
+              '<span class="weight-bar-label">mom</span>' +
+              '<div class="weight-bar-track"><div class="weight-bar-fill momentum" style="width:' + (aw.momentum*100).toFixed(0) + '%"></div></div>' +
+              '<span class="weight-bar-pct">' + (aw.momentum*100).toFixed(0) + '%</span>' +
+            '</div>' +
+            '<div class="weight-bar-row">' +
+              '<span class="weight-bar-label">vol</span>' +
+              '<div class="weight-bar-track"><div class="weight-bar-fill volatility" style="width:' + (aw.volatility*100).toFixed(0) + '%"></div></div>' +
+              '<span class="weight-bar-pct">' + (aw.volatility*100).toFixed(0) + '%</span>' +
+            '</div>' +
+            '<div class="weight-bar-row">' +
+              '<span class="weight-bar-label">bal</span>' +
+              '<div class="weight-bar-track"><div class="weight-bar-fill balance" style="width:' + (aw.balance*100).toFixed(0) + '%"></div></div>' +
+              '<span class="weight-bar-pct">' + (aw.balance*100).toFixed(0) + '%</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="integration-row">' +
+            '<span class="integration-pill ' + (priceSource && priceSource !== 'simulated' ? 'active' : '') + '">' + (priceSource || 'no price') + '</span>' +
+            '<span class="integration-pill ' + (hasJupiter ? 'active' : '') + '">Jupiter ' + (hasJupiter ? '\u2713' : '\u2717') + '</span>' +
+            '<span class="integration-pill ' + (hasAI ? 'active' : '') + '">AI ' + (hasAI ? '\u2713' : '\u2717') + '</span>' +
+          '</div>' +
+          (chain.length > 0 ? (
+            '<div class="reasoning-section">' +
+              '<button class="reasoning-toggle" onclick="document.getElementById(\'' + cardId + '\').style.display = document.getElementById(\'' + cardId + '\').style.display === \'none\' ? \'block\' : \'none\'">Reasoning Chain</button>' +
+              '<div class="reasoning-chain" id="' + cardId + '" style="display:none">' + chain.map(function(l) { return l.replace(/</g, '&lt;'); }).join('<br>') + '</div>' +
+            '</div>'
+          ) : '') +
+          '<div class="agent-wallet">' + shortKey + '</div>' +
+        '</div>';
       }).join('');
+
+      previousAgentIds = currentIds;
     }
 
     function addActivity(event, detail, extra) {
-      const now = new Date();
-      const time = now.toLocaleTimeString();
-      activities.unshift({ time, event, detail, extra });
+      var now = new Date();
+      var time = now.toLocaleTimeString();
+      activities.unshift({ time: time, event: event, detail: detail, extra: extra });
       if (activities.length > MAX_ACTIVITY) activities.length = MAX_ACTIVITY;
 
-      const feed = document.getElementById('activity-feed');
-      feed.innerHTML = activities.map(a => `
-        <div class="activity-item">
-          <div class="activity-time">${a.time}</div>
-          <div class="activity-event">${a.event}</div>
-          <div class="activity-detail">${a.detail}${a.extra ? ' — ' + a.extra : ''}</div>
-        </div>
-      `).join('');
+      var feed = document.getElementById('activity-feed');
+      feed.innerHTML = activities.map(function(a) {
+        return '<div class="activity-item">' +
+          '<div class="activity-time">' + a.time + '</div>' +
+          '<div class="activity-event">' + a.event + '</div>' +
+          '<div class="activity-detail">' + a.detail + (a.extra ? ' \u2014 ' + a.extra : '') + '</div>' +
+        '</div>';
+      }).join('');
     }
 
-    // ── Init ───────────────────────────────────────────────────────────────
+    // ── Transaction History ──────────────────────────────────────────────
+
+    function classifyTxType(tx) {
+      var type = (tx.type || '').toLowerCase();
+      if (type === 'swap' || type === 'buy') return 'swap';
+      if (type === 'sell') return 'sell';
+      if (type === 'memo') return 'memo';
+      if (type === 'stake' || type === 'staking') return 'stake';
+      if (type === 'transfer') return 'transfer';
+      // Guess from other fields
+      if (tx.memo) return 'memo';
+      return type || 'unknown';
+    }
+
+    function formatTxActivity(tx) {
+      var agent = tx.agentName || 'Unknown';
+      var type = classifyTxType(tx);
+      var amount = tx.amount ? (parseFloat(tx.amount).toFixed(4) + ' SOL') : '';
+      return agent + ' ' + type + (amount ? ' ' + amount : '');
+    }
+
+    function addTransaction(tx) {
+      transactions.unshift(tx);
+      if (transactions.length > MAX_TRANSACTIONS) transactions.length = MAX_TRANSACTIONS;
+      renderTransactions();
+    }
+
+    function renderTransactions() {
+      var list = document.getElementById('tx-list');
+      if (!transactions.length) {
+        list.innerHTML = '<div class="empty-state">No transactions yet...</div>';
+        return;
+      }
+
+      list.innerHTML = transactions.map(function(tx) {
+        var type = classifyTxType(tx);
+        var sig = tx.signature || tx.sig || '';
+        var shortSig = sig.length > 16 ? sig.slice(0, 8) + '...' + sig.slice(-4) : sig;
+        var explorerUrl = sig ? ('https://explorer.solana.com/tx/' + sig + '?cluster=devnet') : '';
+        var time = tx.timestamp ? new Date(tx.timestamp).toLocaleTimeString() : '--';
+        var agent = tx.agentName || 'Unknown';
+        var amount = tx.amount ? (parseFloat(tx.amount).toFixed(4) + ' SOL') : '--';
+
+        return '<div class="tx-item">' +
+          '<div class="tx-row">' +
+            '<span class="tx-type ' + type + '">' + type + '</span>' +
+            '<span class="tx-amount">' + amount + '</span>' +
+          '</div>' +
+          '<div class="tx-row">' +
+            '<span class="tx-agent">' + agent + '</span>' +
+            '<span class="tx-time">' + time + '</span>' +
+          '</div>' +
+          (sig ? (
+            '<div class="tx-sig">' +
+              '<a href="' + explorerUrl + '" target="_blank" rel="noopener">' + shortSig + '</a>' +
+            '</div>'
+          ) : '') +
+        '</div>';
+      }).join('');
+    }
+
+    // ── Init ─────────────────────────────────────────────────────────────
 
     connect();
     fetchDashboard();
+    fetchPool();
+    fetchTransactions();
 
     // Poll for dashboard state every 10s as fallback
     setInterval(fetchDashboard, 10000);
+    setInterval(fetchPool, 15000);
+    setInterval(fetchTransactions, 15000);
   </script>
 </body>
 </html>

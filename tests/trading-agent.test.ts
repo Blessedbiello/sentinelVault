@@ -640,6 +640,75 @@ describe('TradingAgent', () => {
 
       expect(agent.getPoolMint()).toBe('SomeTestMintAddress');
     });
+
+    it('execute attempts Jupiter swap before AMM when quote available', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent, wallet } = await buildAgent('dca');
+
+      // Mock Jupiter client to return quote and swap tx
+      const agentAny = agent as any;
+      agentAny.jupiterClient = {
+        getQuote: jest.fn().mockResolvedValue({
+          inputMint: 'SOL',
+          outputMint: 'USDC',
+          inAmount: '10000000',
+          outAmount: '1500000',
+          priceImpactPct: '0.01',
+          routePlan: [],
+          otherAmountThreshold: '0',
+        }),
+        getSwapTransaction: jest.fn().mockResolvedValue('base64-encoded-swap-tx'),
+      };
+
+      // Mock wallet.submitSerializedTransaction
+      (wallet as any).submitSerializedTransaction = jest.fn().mockResolvedValue('jupiter-swap-sig');
+
+      const obs = await (agent as any).observe();
+      const decision = await (agent as any).analyze(obs);
+      decision.action = 'buy';
+
+      const action = await (agent as any).execute(decision);
+
+      expect(action).not.toBeNull();
+      expect(action.type).toBe('buy:jupiter_swap');
+      expect((wallet as any).submitSerializedTransaction).toHaveBeenCalledWith('base64-encoded-swap-tx');
+    });
+
+    it('execute falls back to AMM swap when Jupiter swap fails', async () => {
+      mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
+      const { agent, wallet } = await buildAgent('dca');
+
+      // Mock Jupiter to return quote but submitSerializedTransaction to fail
+      const agentAny = agent as any;
+      agentAny.jupiterClient = {
+        getQuote: jest.fn().mockResolvedValue({
+          inputMint: 'SOL',
+          outputMint: 'USDC',
+          inAmount: '10000000',
+          outAmount: '1500000',
+          priceImpactPct: '0.01',
+          routePlan: [],
+          otherAmountThreshold: '0',
+        }),
+        getSwapTransaction: jest.fn().mockResolvedValue('base64-swap-tx'),
+      };
+      (wallet as any).submitSerializedTransaction = jest.fn().mockRejectedValue(new Error('devnet fail'));
+
+      // Set up AMM pool so it falls back to AMM
+      const mockSwap = jest.fn().mockResolvedValue('amm-swap-sig');
+      (wallet as any).swapSolForToken = mockSwap;
+      agent.setPoolMint('FakeMint', 'FakeAuth');
+
+      const obs = await (agent as any).observe();
+      const decision = await (agent as any).analyze(obs);
+      decision.action = 'buy';
+
+      const action = await (agent as any).execute(decision);
+
+      expect(action).not.toBeNull();
+      expect(action.type).toBe('swap_sol_for_token:buy');
+      expect(mockSwap).toHaveBeenCalled();
+    });
   });
 
   // ── setTargetAddress ───────────────────────────────────────────────────────

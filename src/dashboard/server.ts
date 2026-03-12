@@ -15,6 +15,9 @@ import { AgentType, AuditQueryFilters, StrategyConfig } from '../types';
 interface DashboardServerConfig {
   port?: number;
   wsPort?: number;
+  /** When true, attach the WebSocket server to the same HTTP server as Express.
+   *  This allows Fly.io (single exposed port) deployments to work correctly. */
+  singlePort?: boolean;
 }
 
 interface WsMessage {
@@ -38,6 +41,7 @@ export class DashboardServer {
 
   private readonly port: number;
   private readonly wsPort: number;
+  private readonly singlePort: boolean;
 
   // ── Core Dependencies ──────────────────────────────────────────────────────
 
@@ -62,6 +66,7 @@ export class DashboardServer {
     this.orchestrator = orchestrator;
     this.port = config.port ?? 3000;
     this.wsPort = config.wsPort ?? 3001;
+    this.singlePort = config.singlePort ?? false;
 
     this.app = express();
     this.configureMiddleware();
@@ -217,6 +222,46 @@ export class DashboardServer {
       }
     });
 
+    // ── Pool State ─────────────────────────────────────────────────────────────
+
+    this.app.get('/api/pool', (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        // Pool state is not tracked on AgentState directly. Return a best-effort
+        // response using the dashboard state or a placeholder indicating no pool.
+        const dashState = this.orchestrator.getDashboardState() as unknown as Record<string, unknown>;
+        if (dashState.poolState) {
+          res.json(dashState.poolState);
+        } else {
+          res.json({ status: 'no_pool_configured' });
+        }
+      } catch (err) {
+        next(err);
+      }
+    });
+
+    // ── Transactions ───────────────────────────────────────────────────────────
+
+    this.app.get('/api/transactions', (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        // Pull recent transactions from the dashboard state which already
+        // aggregates recentTxSignatures from the orchestrator.
+        const dashState = this.orchestrator.getDashboardState() as unknown as Record<string, unknown>;
+        const recentTxs = (dashState.recentTransactions || []) as Record<string, unknown>[];
+        const mapped = recentTxs.map((tx) => ({
+          signature: (tx.result as Record<string, unknown>)?.signature || tx.id || '',
+          agentId: (tx.request as Record<string, unknown>)?.agentId || '',
+          agentName: (tx.request as Record<string, unknown>)?.agentId || 'Unknown',
+          type: (tx.request as Record<string, unknown>)?.type || 'transfer',
+          timestamp: tx.createdAt || 0,
+          amount: null,
+          status: tx.status,
+        }));
+        res.json(mapped.slice(0, 50));
+      } catch (err) {
+        next(err);
+      }
+    });
+
     // ── Audit Log ─────────────────────────────────────────────────────────────
 
     this.app.get('/api/audit', (req: Request, res: Response, next: NextFunction) => {
@@ -323,6 +368,14 @@ export class DashboardServer {
     this.orchestrator.on('metrics:updated', (metrics) => {
       this.broadcast('metrics:updated', metrics);
     });
+
+    this.orchestrator.on('pool:updated', (data) => {
+      this.broadcast('pool:updated', data);
+    });
+
+    this.orchestrator.on('transaction:executed', (data) => {
+      this.broadcast('transaction:executed', data);
+    });
   }
 
   /**
@@ -359,37 +412,60 @@ export class DashboardServer {
 
       this.httpServer.on('error', reject);
 
-      this.httpServer.listen(this.port, () => {
-        console.log(`[DashboardServer] REST API listening on http://localhost:${this.port}`);
+      this.httpServer.listen(this.port, '0.0.0.0', () => {
+        console.log(`[DashboardServer] REST API listening on http://0.0.0.0:${this.port}`);
 
         // ── WebSocket server ───────────────────────────────────────────────────
 
-        this.wsHttpServer = http.createServer();
-        this.wss = new WebSocketServer({ server: this.wsHttpServer });
+        if (this.singlePort) {
+          // Attach WebSocket to the same HTTP server — single port mode for Fly.io.
+          this.wss = new WebSocketServer({ server: this.httpServer! });
 
-        this.subscribeToOrchestratorEvents();
+          this.subscribeToOrchestratorEvents();
 
-        this.wss.on('connection', (client: WebSocket) => {
-          console.log('[DashboardServer] WebSocket client connected');
-          this.sendInitialSnapshot(client);
+          this.wss.on('connection', (client: WebSocket) => {
+            console.log('[DashboardServer] WebSocket client connected');
+            this.sendInitialSnapshot(client);
 
-          client.on('close', () => {
-            console.log('[DashboardServer] WebSocket client disconnected');
+            client.on('close', () => {
+              console.log('[DashboardServer] WebSocket client disconnected');
+            });
+
+            client.on('error', (err) => {
+              console.error('[DashboardServer] WebSocket client error:', err.message);
+            });
           });
 
-          client.on('error', (err) => {
-            console.error('[DashboardServer] WebSocket client error:', err.message);
-          });
-        });
-
-        this.wsHttpServer.on('error', (err) => {
-          console.error('[DashboardServer] WebSocket server error:', err.message);
-        });
-
-        this.wsHttpServer.listen(this.wsPort, () => {
-          console.log(`[DashboardServer] WebSocket server listening on ws://localhost:${this.wsPort}`);
+          console.log(`[DashboardServer] WebSocket server attached to same port ${this.port}`);
           resolve();
-        });
+        } else {
+          this.wsHttpServer = http.createServer();
+          this.wss = new WebSocketServer({ server: this.wsHttpServer });
+
+          this.subscribeToOrchestratorEvents();
+
+          this.wss.on('connection', (client: WebSocket) => {
+            console.log('[DashboardServer] WebSocket client connected');
+            this.sendInitialSnapshot(client);
+
+            client.on('close', () => {
+              console.log('[DashboardServer] WebSocket client disconnected');
+            });
+
+            client.on('error', (err) => {
+              console.error('[DashboardServer] WebSocket client error:', err.message);
+            });
+          });
+
+          this.wsHttpServer.on('error', (err) => {
+            console.error('[DashboardServer] WebSocket server error:', err.message);
+          });
+
+          this.wsHttpServer.listen(this.wsPort, () => {
+            console.log(`[DashboardServer] WebSocket server listening on ws://localhost:${this.wsPort}`);
+            resolve();
+          });
+        }
       });
     });
   }
@@ -402,7 +478,7 @@ export class DashboardServer {
     return new Promise((resolve, reject) => {
       const closeWsServer = (): Promise<void> =>
         new Promise((wsResolve, wsReject) => {
-          if (this.wss === null || this.wsHttpServer === null) {
+          if (this.wss === null) {
             wsResolve();
             return;
           }
@@ -412,8 +488,9 @@ export class DashboardServer {
             client.terminate();
           }
 
-          this.wss.close(() => {
-            this.wsHttpServer!.close((err) => {
+          if (this.singlePort || this.wsHttpServer === null) {
+            // In single-port mode the WSS shares the HTTP server; just close WSS.
+            this.wss.close((err) => {
               if (err) {
                 wsReject(err);
               } else {
@@ -421,7 +498,18 @@ export class DashboardServer {
                 wsResolve();
               }
             });
-          });
+          } else {
+            this.wss.close(() => {
+              this.wsHttpServer!.close((err) => {
+                if (err) {
+                  wsReject(err);
+                } else {
+                  console.log('[DashboardServer] WebSocket server closed.');
+                  wsResolve();
+                }
+              });
+            });
+          }
         });
 
       const closeHttpServer = (): Promise<void> =>
@@ -492,6 +580,8 @@ if (require.main === module) {
       console.log('    POST /api/agents/:id/pause');
       console.log('    POST /api/agents/:id/resume');
       console.log('    DEL  /api/agents/:id');
+      console.log('    GET  /api/pool');
+      console.log('    GET  /api/transactions');
       console.log('    GET  /api/audit');
       console.log('    GET  /api/risk');
       console.log('    GET  /api/alerts');
