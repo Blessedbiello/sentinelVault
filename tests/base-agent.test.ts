@@ -615,6 +615,58 @@ describe('BaseAgent', () => {
     expect((agent as any).pendingOutcomes[0].ticksRemaining).toBe(3);
   });
 
+  // ── Concurrent cycle guard ────────────────────────────────────────────────
+
+  describe('concurrent cycle guard', () => {
+    it('skips cycle if previous cycle is still running', async () => {
+      jest.useRealTimers();
+
+      // Create agent with a slow observe that takes 100ms
+      let observeCallCount = 0;
+      const SlowAgent = class extends (BaseAgent as any) {
+        constructor(cfg: any, w: any) {
+          super(cfg, w);
+        }
+        protected async observe() {
+          observeCallCount++;
+          await new Promise(r => setTimeout(r, 100));
+          return { price: 1.0 };
+        }
+        protected async analyze() {
+          return { id: 'test', agentId: 'test', timestamp: Date.now(), marketConditions: {}, analysis: 'test', action: 'hold', confidence: 0.3, reasoning: 'test', executed: false };
+        }
+        protected async execute() { return null; }
+        protected async evaluate() {}
+      };
+
+      // Start with very short interval (10ms)
+      const config = {
+        id: 'test-slow',
+        name: 'Slow Agent',
+        type: 'trader' as const,
+        walletConfig: { id: 'w', label: 'w', password: 'p', cluster: 'devnet' as const },
+        strategy: { name: 'test', type: 'dca', cooldownMs: 10, params: { targetAddress: '11111111111111111111111111111111' } },
+        securityPolicy: {} as any,
+        enabled: true,
+      };
+
+      const slowWallet = createMockWallet();
+      const slowAgent = new SlowAgent(config, slowWallet);
+      slowAgent.start();
+
+      // Wait enough time for multiple intervals to fire
+      await new Promise(r => setTimeout(r, 250));
+      slowAgent.stop();
+
+      // With guard: observe should be called ~2-3 times (100ms observe + 10ms interval)
+      // Without guard: observe would be called ~25 times
+      expect(observeCallCount).toBeLessThanOrEqual(5);
+      expect(observeCallCount).toBeGreaterThanOrEqual(1);
+
+      jest.useFakeTimers();
+    });
+  });
+
   // ── Supplemental: auto-recovery does NOT fire if agent is stopped ──────────
 
   test('auto-recovery does not call resume() when the agent is explicitly stopped before the delay elapses', async () => {

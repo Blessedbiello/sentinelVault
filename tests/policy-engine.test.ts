@@ -352,4 +352,27 @@ describe('PolicyEngine', () => {
     const summary = engine.getSpendingSummary();
     expect(summary.hourly.limit).toBe(2); // original hourly limit preserved
   });
+
+  // ── 20. evaluateAlertThresholds ──────────────────────────────────────────────
+
+  describe('evaluateAlertThresholds', () => {
+    it('detects low balance', () => {
+      const policy = PolicyEngine.createDefaultPolicy();
+      const engine = new PolicyEngine('test', policy);
+
+      const alerts = engine.evaluateAlertThresholds(0.05);
+      const lowBalanceAlert = alerts.find(a => a.type === 'balance_low');
+      expect(lowBalanceAlert).toBeDefined();
+      expect(lowBalanceAlert!.message).toContain('below threshold');
+    });
+
+    it('returns empty when balance is above threshold', () => {
+      const policy = PolicyEngine.createDefaultPolicy();
+      const engine = new PolicyEngine('test', policy);
+
+      const alerts = engine.evaluateAlertThresholds(1.0);
+      const lowBalanceAlert = alerts.find(a => a.type === 'balance_low');
+      expect(lowBalanceAlert).toBeUndefined();
+    });
+  });
 });

@@ -70,6 +70,7 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   private uptime: number;
   private decisionHistory: AgentDecision[];
   private cycleInterval: ReturnType<typeof setInterval> | null = null;
+  private _cycleRunning = false;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super();
@@ -142,6 +143,9 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
    * delay unless the agent has been explicitly stopped.
    */
   private async runCycle(): Promise<void> {
+    if (this._cycleRunning) return; // Skip if previous cycle still running
+    this._cycleRunning = true;
+    try {
     this.status = 'analyzing';
 
     try {
@@ -213,6 +217,9 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
 
     // Restore idle status only on a clean cycle completion.
     this.status = 'idle';
+    } finally {
+      this._cycleRunning = false;
+    }
   }
 
   /**

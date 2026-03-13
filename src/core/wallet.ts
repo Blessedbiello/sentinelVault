@@ -7,6 +7,7 @@ import {
   Connection,
   Keypair,
   Transaction,
+  VersionedTransaction,
   TransactionInstruction,
   SystemProgram,
   PublicKey,
@@ -27,6 +28,7 @@ import {
 import { KeystoreManager } from './keystore';
 import { PolicyEngine } from '../security/policy-engine';
 import { AmmClient } from '../integrations/amm-client';
+import { KoraClient } from '../integrations/kora-client';
 import {
   WalletConfig,
   WalletState,
@@ -89,6 +91,7 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   private readonly password: string;
 
   private policyEngine: PolicyEngine | null = null;
+  private koraClient: KoraClient | null = null;
   private state: WalletState | null = null;
   private keystoreId: string | null = null;
   private connection: Connection | null = null;
@@ -225,13 +228,46 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       throw new Error(`Transfer amount must be positive, got ${amountSol}`);
     }
 
-    // Policy gate: validate spending limits, rate limits, and allowlists
+    // Validate destination address
+    try {
+      new PublicKey(destination);
+    } catch {
+      throw new Error(`Invalid destination address: ${destination}`);
+    }
+
+    // Policy gate FIRST — before any transfer path
     this.enforcePolicy({
       amountSol,
       destination,
       programId: SYSTEM_PROGRAM_ADDRESS,
       type: 'transfer_sol',
     });
+
+    // Attempt gasless transfer via Kora when available
+    if (this.koraClient?.isAvailable()) {
+      try {
+        const pubkey = this.getState()?.publicKey;
+        if (pubkey) {
+          const koraTx = await this.koraClient.transferTransaction({
+            source: pubkey,
+            destination,
+            amount: amountSol,
+          });
+          if (koraTx) {
+            const koraResult = await this.koraClient.signAndSendTransaction({ transaction: koraTx });
+            if (koraResult) {
+              if (this.policyEngine) {
+                this.policyEngine.recordTransaction(amountSol);
+              }
+              this.emit('transaction:confirmed', koraResult.signature);
+              return koraResult.signature;
+            }
+          }
+        }
+      } catch {
+        // Kora failed — fall through to standard transfer
+      }
+    }
 
     const fromPubkey = new PublicKey(this.state!.publicKey);
     const toPubkey = new PublicKey(destination);
@@ -751,10 +787,60 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   async submitSerializedTransaction(base64Tx: string): Promise<string> {
     this.assertReady();
 
-    const buffer = Buffer.from(base64Tx, 'base64');
-    const transaction = Transaction.from(buffer);
+    // Attempt submission via Kora when available
+    if (this.koraClient?.isAvailable()) {
+      try {
+        const koraResult = await this.koraClient.signAndSendTransaction({ transaction: base64Tx });
+        if (koraResult) {
+          this.emit('transaction:confirmed', koraResult.signature);
+          return koraResult.signature;
+        }
+      } catch {
+        // Kora failed — fall through to standard submission
+      }
+    }
 
+    const buffer = Buffer.from(base64Tx, 'base64');
+    const isVersioned = (buffer[0] & 0x80) !== 0;
+
+    if (isVersioned) {
+      // Jupiter V0 transactions come pre-signed — broadcast raw
+      const signature = await this.connection!.sendRawTransaction(buffer, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+      await this.connection!.confirmTransaction(signature, 'confirmed');
+      this.emit('transaction:confirmed', signature);
+      return signature;
+    }
+
+    // Legacy transaction — existing path
+    const transaction = Transaction.from(buffer);
     return this.signAndSendTransaction(transaction);
+  }
+
+  /**
+   * Fetch real transaction metadata (slot, fee, blockTime) from a confirmed
+   * transaction signature. Best-effort: returns zeros/null on failure.
+   */
+  async enrichTransactionResult(signature: string): Promise<{slot: number; fee: number; blockTime: number | null}> {
+    const fetchTx = () => this.connection!.getTransaction(signature, {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0,
+    });
+
+    try {
+      let tx = await fetchTx();
+      if (!tx) {
+        // Transaction may not be indexed yet — retry once after 500ms
+        await new Promise(r => setTimeout(r, 500));
+        tx = await fetchTx();
+      }
+      if (tx) {
+        return { slot: tx.slot, fee: tx.meta?.fee ?? 0, blockTime: tx.blockTime ?? null };
+      }
+    } catch { /* best-effort */ }
+    return { slot: 0, fee: 0, blockTime: null };
   }
 
   /**
@@ -1202,6 +1288,11 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
    */
   setPolicyEngine(engine: PolicyEngine): void {
     this.policyEngine = engine;
+  }
+
+  /** Attach a KoraClient for gasless transaction support. */
+  setKoraClient(client: KoraClient): void {
+    this.koraClient = client;
   }
 
   /** Return the attached PolicyEngine, or null if none is set. */

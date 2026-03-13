@@ -268,7 +268,7 @@ export class PolicyEngine extends EventEmitter<PolicyEngineEvents> {
         'Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2',     // SentinelVault On-Chain Program
       ],
       blockedAddresses:        [],
-      requireSimulation:       true,
+      requireSimulation:       true,  // Reserved: preflight tx simulation (requires RPC simulateTransaction)
       maxTransactionsPerMinute: 10,
       maxTransactionsPerHour:   60,
       maxTransactionsPerDay:    500,
@@ -279,6 +279,72 @@ export class PolicyEngine extends EventEmitter<PolicyEngineEvents> {
         { type: 'failed_tx_spike',   value: 10,   action: 'stop'  },
       ],
     };
+  }
+
+  // ── Alert Threshold Evaluation ─────────────────────────────────────────────
+
+  /**
+   * Evaluate alert thresholds against current wallet balance and spending.
+   * Returns an array of triggered alerts. Call this after transactions or on
+   * a periodic health check.
+   *
+   * @param currentBalanceSol - Current wallet SOL balance.
+   */
+  evaluateAlertThresholds(currentBalanceSol: number): { type: string; value: number; action: string; message: string }[] {
+    const alerts: { type: string; value: number; action: string; message: string }[] = [];
+
+    if (!this.policy.alertThresholds || this.policy.alertThresholds.length === 0) {
+      return alerts;
+    }
+
+    for (const threshold of this.policy.alertThresholds) {
+      switch (threshold.type) {
+        case 'balance_low':
+          if (currentBalanceSol < threshold.value) {
+            alerts.push({
+              ...threshold,
+              message: `Balance ${currentBalanceSol.toFixed(4)} SOL is below threshold ${threshold.value} SOL`,
+            });
+          }
+          break;
+        case 'high_spending': {
+          // threshold.value is fraction of daily limit (e.g. 0.8 = 80%)
+          const now = Date.now();
+          this.refreshWindowIfExpired(this.dailyWindow, MS_PER_DAY, now);
+          const dailyLimit = this.policy.spendingLimits.daily;
+          const spendingRatio = dailyLimit > 0 ? this.dailyWindow.amount / dailyLimit : 0;
+          if (spendingRatio >= threshold.value) {
+            alerts.push({
+              ...threshold,
+              message: `Daily spending at ${(spendingRatio * 100).toFixed(1)}% of limit (${this.dailyWindow.amount.toFixed(4)}/${dailyLimit} SOL)`,
+            });
+          }
+          break;
+        }
+        case 'unusual_activity': {
+          // threshold.value = max tx count per minute before flagging
+          const now = Date.now();
+          const recentCount = this.transactionTimestamps.filter(ts => now - ts < MS_PER_MINUTE).length;
+          if (recentCount >= threshold.value) {
+            alerts.push({
+              ...threshold,
+              message: `${recentCount} transactions in the last minute exceeds threshold of ${threshold.value}`,
+            });
+          }
+          break;
+        }
+        case 'failed_tx_spike':
+          if (this.circuitBreaker.failures >= threshold.value) {
+            alerts.push({
+              ...threshold,
+              message: `${this.circuitBreaker.failures} consecutive failures exceeds threshold of ${threshold.value}`,
+            });
+          }
+          break;
+      }
+    }
+
+    return alerts;
   }
 
   // ── Private Validation Steps ─────────────────────────────────────────────────

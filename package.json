@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@pythnetwork/price-service-client": "^1.9.1",
+    "@solana/kora": "^0.2.0",
     "@solana/spl-token": "^0.4.6",
     "@solana/web3.js": "^1.95.0",
     "boxen": "^5.1.2",

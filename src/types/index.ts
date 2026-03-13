@@ -408,6 +408,34 @@ export interface JupiterQuote {
   otherAmountThreshold: string;
 }
 
+// ─── AI Decision Types ──────────────────────────────────────────────────────
+
+export interface AgentDecisionContext {
+  agentName: string;
+  agentType: 'trader' | 'arbitrageur' | 'portfolio_manager' | 'liquidity_provider';
+  strategy: string;
+  solPrice: number;
+  priceSource: string;
+  priceHistory: number[];
+  marketRegime: string;
+  solBalance: number;
+  tokenBalances: { mint: string; balance: number; symbol: string }[];
+  totalPortfolioValueSol: number;
+  quantitativeSignal: { action: string; confidence: number; factors: Record<string, number> };
+  poolState?: { solReserve: number; tokenReserve: number; price: number } | null;
+  jupiterQuote?: { outAmount: string; priceImpactPct: string; route: string } | null;
+  recentDecisions: { action: string; confidence: number; outcome?: string }[];
+  reasoningChain: string[];
+}
+
+export interface AIDecisionResult {
+  action: string;
+  confidence: number;
+  reasoning: string;
+  riskAssessment: string;
+  marketOutlook: string;
+}
+
 // ─── AMM Pool Types ─────────────────────────────────────────────────────────
 
 export interface PoolState {

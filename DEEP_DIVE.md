@@ -291,7 +291,31 @@ The orchestrator exposes `setPoolMintForAgents(mintAddress)` which wires the tok
 - **LiquidityAgent** reads real on-chain pool state (`getPoolState()`) during `observe()` to track reserves, price, and imbalance. During `execute()`, it performs swap-based rebalancing through the AMM when the pool is configured. Since `addLiquidity` is authority-only, the agent uses `swapSolForToken()` as a permissionless alternative for adding exposure to the pool.
 - **PortfolioAgent** uses the AMM pool price (`solReserve / tokenReserve`) for real token valuation instead of a hardcoded multiplier. Rebalances its SOL/token allocation by swapping through the AMM when drift exceeds its threshold.
 
-All agents fall back to `wallet.transferSOL()` if the swap transaction fails or no pool is configured, ensuring graceful degradation.
+All agents fall back to `wallet.transferSOL()` if the swap transaction fails or no pool is configured, ensuring graceful degradation. Fallback transfers are labeled as `signal:buy`/`signal:sell` (not `swap`) so the audit log honestly distinguishes intent signals from real trades.
+
+### Known Constraints & Design Rationale
+
+1. **LP Token Model (Future Direction).** The AMM uses `x*y=k` without LP tokens — a deliberate simplification. Production would add an LP mint to `PoolState` for proportional liquidity tracking.
+
+2. **`add_liquidity` Authority Constraint.** Requires `pool.authority == signer`. The LiquidityAgent participates through `swapSolForToken` / `swapTokenForSol`, acting as a market participant providing passive liquidity via swaps rather than direct LP provisioning.
+
+3. **Arbitrage Spread Model.** When no AMM pool is configured, the ArbitrageAgent uses an EMA-based persistent spread model (not random). The spread drifts slowly and mean-reverts toward zero, simulating real secondary market dynamics. When a pool IS configured, the real pool price overrides the model entirely.
+
+4. **Transaction Metadata Enrichment.** Agents call `wallet.enrichTransactionResult(signature)` after confirmation to populate real `slot`, `fee`, and `blockTime` from on-chain data. The dashboard displays real Solana slot numbers and fee data instead of zeros.
+
+5. **Versioned Transaction Support.** `submitSerializedTransaction()` detects Jupiter V0 versioned transactions (bit 7 of first byte set) and broadcasts them via `sendRawTransaction` without re-signing. Legacy transactions continue through the existing `signAndSendTransaction` path.
+
+6. **Dynamic Base Price Calibration.** The TradingAgent's mean-reversion strategy calibrates its `basePrice` from the first real price feed observation. This ensures buy/sell thresholds track the actual market ($0.95×$150 = $142.50) rather than comparing real prices against a $1.00 default.
+
+7. **Shared Services Architecture.** The orchestrator injects shared `PriceFeed`, `JupiterClient`, and `AIAdvisor` instances into all agents, eliminating duplicate HTTP clients and caches. All four agents share a single 30-second price cache, a single Jupiter quote client, and a single AI advisor with stateful decision history.
+
+8. **Concurrent Cycle Guard.** The OODA loop includes a `_cycleRunning` mutex that prevents overlapping cycles when async operations (RPC calls, API fetches) exceed the cooldown interval. If a cycle is still executing when the next interval fires, the new cycle is skipped entirely rather than stacking.
+
+9. **Policy Enforcement Ordering.** `enforcePolicy()` runs before any transfer path, including Kora gasless attempts. `recordTransaction()` is called in both the Kora path and the standard path so spending window accounting is never bypassed regardless of which execution path succeeds.
+
+10. **Alert Threshold Evaluation.** `PolicyEngine.evaluateAlertThresholds()` evaluates four conditions against configurable thresholds: `balance_low` (SOL balance below floor), `high_spending` (24h spend above threshold), `unusual_activity` (transaction rate spike), and `failed_tx_spike` (elevated failure rate). Alerts are emitted as `high` or `medium` severity events to the audit logger and dashboard.
+
+11. **Address Validation.** `transferSOL()` validates that the destination is a parseable Solana public key (`new PublicKey(destination)`) before any network operations begin. Invalid addresses are rejected immediately with a descriptive error rather than propagating a cryptic RPC error.
 
 ---
 
@@ -444,17 +468,47 @@ The effective trade size is `min(0.01, balance x 0.1)`, and the trade is only ex
 
 ---
 
-## 11. Wallet Standard and Kora Compatibility
+## 11. Kora Gasless Transaction Integration
 
-SentinelVault's `AgenticWallet` exposes `signTransaction` and `signAndSendTransaction` semantics that align with the `@solana/wallet-standard-features` interface. Although the wallet manages its own keystore internally, its public method signatures (`signTransaction(tx)`, `signAndSendTransaction(tx)`) follow the same patterns used by wallet-standard adapters. This makes SentinelVault compatible with any dApp or SDK that accepts a wallet-standard signer.
+SentinelVault integrates with [Kora](https://kora.solana.com/) (Solana Foundation's fee abstraction layer) to enable gasless transactions for agent wallets. Our `KoraClient` implements all 9 methods from the `@solana/kora` v0.2.0 API using direct fetch to avoid runtime conflicts between Kora SDK's `@solana/kit` dependency and our `@solana/web3.js` stack.
 
-**Kora Integration Path.** [Kora](https://www.kora.network/) provides permissionless wallet infrastructure for Solana with hardware-backed key storage and policy-driven transaction approval. In a production deployment, Kora's wallet service could replace SentinelVault's `KeystoreManager` as the key custody layer, providing:
+**How It Works.** When `KORA_RPC_URL` is configured, agent wallets attempt gasless submission before falling back to standard fee-paying transactions:
 
-- **Hardware-backed key storage** — Move private keys from encrypted-file-on-disk (current) to hardware security modules, eliminating the password-in-memory trade-off documented in Section 3.
-- **Policy-as-a-service** — Kora's transaction approval policies could complement or replace the `PolicyEngine`'s eight-layer validation chain, adding multi-party approval workflows and on-chain governance.
-- **Wallet-as-a-service** — Each agent could receive a Kora-managed wallet, preserving the per-agent isolation guarantee while offloading key management to battle-tested infrastructure.
+1. Agent builds a transfer → `AgenticWallet.transferSOL()` calls `KoraClient.transferTransaction({ source, destination, amount })`
+2. Kora constructs a fee-sponsored transaction server-side → returns base64-encoded transaction
+3. Agent signs and submits via `KoraClient.signAndSendTransaction({ transaction })` → Kora's paymaster covers the SOL fee
+4. If Kora is unavailable or fails, the wallet falls back to standard `sendAndConfirmTransaction` with the agent paying fees normally
 
-The integration requires implementing a `KoraKeystoreAdapter` that wraps Kora's API behind the same `decryptKeypair()` / `signTransaction()` interface that `KeystoreManager` exposes today. The agent layer, security layer, and interface layer require zero changes — only the core layer's key custody implementation is swapped.
+**API Surface.** The 9 methods match `@solana/kora` v0.2.0 exactly:
+
+| Method | Purpose |
+|--------|---------|
+| `signAndSendTransaction` | Sign and broadcast via paymaster |
+| `signTransaction` | Sign without sending (multi-sig flows) |
+| `transferTransaction` | Build a fee-sponsored transfer |
+| `getConfig` | Server configuration |
+| `getPayerSigner` | Payer signer and payment addresses |
+| `getBlockhash` | Recent blockhash from Kora |
+| `getSupportedTokens` | SPL tokens accepted for fee payment |
+| `estimateTransactionFee` | Fee estimate in lamports and tokens |
+| `getPaymentInstruction` | Payment instruction for custom transactions |
+
+**Configuration.** Set `KORA_RPC_URL` in `.env`. Optional `apiKey` and `hmacSecret` can be passed to the constructor for authenticated endpoints. When no endpoint is configured, all methods return `null` immediately — zero impact on agent behavior.
+
+## 11b. AI-First Agent Architecture
+
+All four agent types (TradingAgent, ArbitrageAgent, PortfolioAgent, LiquidityAgent) integrate the AI Brain via `AIAdvisor.getAgentDecision()`. When an LLM API key is configured (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), the AI Brain serves as the **primary decision-maker** with the quantitative model as reference context.
+
+Each agent builds a rich `AgentDecisionContext` that includes:
+- **Market data**: SOL/USD price, price history, market regime
+- **Portfolio state**: SOL balance, token holdings, total portfolio value
+- **On-chain state**: AMM pool reserves, Jupiter DEX quotes
+- **Quantitative model output**: factor scores, composite confidence
+- **Decision history**: last 3 decisions with outcomes for in-session learning
+
+The LLM receives this full context and returns an `AIDecisionResult` with action, confidence, reasoning, risk assessment, and market outlook. The reasoning chain tracks both quantitative factors and AI Brain entries, visible in the dashboard's AI Decision Panel.
+
+When no API key is configured, all agents fall back to their quantitative models with zero impact — the AI layer is entirely optional.
 
 ---
 
@@ -497,7 +551,7 @@ SentinelVault demonstrates that autonomous AI agents can safely manage blockchai
 - **Agent layer** adapts the OODA decision loop from military strategy to DeFi, with a confidence gate that prevents low-conviction trades, auto-recovery from transient errors, isolated wallets per agent, and real swap execution through the on-chain constant-product AMM.
 - **Interface layer** surfaces everything through a CLI, REST API, and WebSocket dashboard, making the system observable and controllable in real time.
 
-This is not a theoretical design. The devnet prototype creates real wallets, requests real airdrops, submits real transactions, executes real AMM swaps, and produces real Solana Explorer-verifiable signatures. Every architectural decision documented here is implemented in working TypeScript, backed by a test suite of 317 tests across 15 suites covering the keystore, wallet, policy engine, audit logger, AMM client, all four agent types, and the orchestrator.
+This is not a theoretical design. The devnet prototype creates real wallets, requests real airdrops, submits real transactions, executes real AMM swaps, and produces real Solana Explorer-verifiable signatures. Every architectural decision documented here is implemented in working TypeScript, backed by a test suite of 393 tests across 16 suites covering the keystore, wallet, policy engine, audit logger, AMM client, all four agent types, and the orchestrator.
 
 The framework already integrates with Jupiter for real price feeds and DEX swap quotes, executes token swaps through a custom on-chain AMM, and supports optional LLM-powered trade recommendations via the AI Advisor. The path from devnet prototype to mainnet deployment requires integrating Jupiter swap execution against real liquidity pools, hardening the KDF to Argon2id, adding multi-sig support for high-value operations, and implementing ML-based anomaly detection on the audit stream. The framework is explicitly designed so that each of these additions touches exactly one layer while the rest remains stable.
 

@@ -421,7 +421,7 @@ describe('LiquidityAgent', () => {
 
       expect(mockSwap).toHaveBeenCalled();
       expect(action).not.toBeNull();
-      expect(action!.type).toBe('add_liquidity:swap_sol_for_token');
+      expect(action!.type).toBe('market_buy:providing_liquidity');
     });
 
     it('execute falls back to transferSOL when swap fails', async () => {

@@ -50,6 +50,7 @@ jest.mock('@solana/web3.js', () => {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+const ALT_DEX_SPREAD_RANGE = 0.03;
 
 function makeConfig(): AgentConfig {
   return {
@@ -371,5 +372,63 @@ describe('ArbitrageAgent', () => {
 
     await (agent as any).evaluate(action, decision);
     expect((agent as any).pendingOutcomes.length).toBe(1);
+  });
+
+  // ── EMA Spread Model ──────────────────────────────────────────────────
+
+  it('altDexPrice uses persistent EMA spread when pool is not configured', async () => {
+    const { agent } = await buildAgent();
+    const agentAny = agent as any;
+
+    // No pool configured, so alt DEX price uses EMA spread
+    expect(agentAny.poolMint).toBeNull();
+
+    // Run multiple observe cycles — spread should persist and drift slowly
+    const spreads: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      await (agent as any).observe();
+      const spread = Math.abs(agentAny.altDexPrice - agentAny.currentPrice) / agentAny.currentPrice;
+      spreads.push(spread);
+    }
+
+    // All spreads should be small (EMA-decayed, not big random jumps)
+    for (const s of spreads) {
+      expect(s).toBeLessThan(ALT_DEX_SPREAD_RANGE + 0.01);
+    }
+
+    // altDexSpread field should exist and be bounded
+    expect(Math.abs(agentAny.altDexSpread)).toBeLessThanOrEqual(ALT_DEX_SPREAD_RANGE);
+  });
+
+  // ── processPendingOutcomes ────────────────────────────────────────────
+
+  it('processPendingOutcomes evaluates arbitrage by spread convergence', async () => {
+    const { agent } = await buildAgent();
+    const agentAny = agent as any;
+
+    // Manually add a pending outcome
+    agentAny.pendingOutcomes = [{
+      decisionId: 'test-arb-po',
+      action: 'arbitrage',
+      entryPrice: 150,
+      confidence: 0.8,
+      ticksRemaining: 1,
+      decision: {
+        id: 'test-arb-po',
+        agentId: 'arb-test-1',
+        timestamp: Date.now(),
+        marketConditions: {},
+        analysis: 'test',
+        action: 'arbitrage',
+        confidence: 0.8,
+        reasoning: 'test',
+        executed: true,
+      },
+    }];
+
+    // Price barely moved (< 2%) → should be a "win" for arb
+    agentAny.processPendingOutcomes(151); // 0.67% change < 2%
+    expect(agentAny.pendingOutcomes.length).toBe(0);
+    expect(agent.getWeightHistory().length).toBeGreaterThanOrEqual(1);
   });
 });

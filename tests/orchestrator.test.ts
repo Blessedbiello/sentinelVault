@@ -97,6 +97,8 @@ function createMockAgent(config: any) {
     getConfidenceCalibration: jest.fn().mockReturnValue([]),
     on: jest.fn(),
     emit: jest.fn(),
+    setSharedServices: jest.fn(),
+    setAIAdvisor: jest.fn(),
   };
 }
 
@@ -185,6 +187,31 @@ jest.mock('../src/security/audit-logger', () => ({
     }),
     query: jest.fn().mockReturnValue([]),
     close: mockAuditClose,
+  })),
+}));
+
+// ── Mock: Integration Services ───────────────────────────────────────────────
+
+jest.mock('../src/integrations/price-feed', () => ({
+  PriceFeed: jest.fn().mockImplementation(() => ({
+    getSOLPrice: jest.fn().mockResolvedValue(null),
+  })),
+}));
+
+jest.mock('../src/integrations/jupiter', () => ({
+  JupiterClient: jest.fn().mockImplementation(() => ({
+    getQuote: jest.fn().mockResolvedValue(null),
+    getSwapTransaction: jest.fn().mockResolvedValue(null),
+  })),
+  SOL_MINT: 'So11111111111111111111111111111111111111112',
+  USDC_MINT: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+}));
+
+jest.mock('../src/integrations/ai-advisor', () => ({
+  AIAdvisor: jest.fn().mockImplementation(() => ({
+    getAgentDecision: jest.fn().mockResolvedValue(null),
+    getTradeRecommendation: jest.fn().mockResolvedValue(null),
+    recordOutcome: jest.fn(),
   })),
 }));
 

@@ -26,6 +26,7 @@ jest.mock('../src/core/keystore', () => ({
 // ── Mock @solana/web3.js Connection ─────────────────────────────────────────
 
 const mockGetBalance = jest.fn().mockResolvedValue(2 * LAMPORTS_PER_SOL);
+const mockGetTransaction = jest.fn().mockResolvedValue(null);
 const mockGetLatestBlockhash = jest.fn().mockResolvedValue({
   blockhash: 'EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N',
   lastValidBlockHeight: 100,
@@ -41,6 +42,7 @@ jest.mock('@solana/web3.js', () => {
     ...actual,
     Connection: jest.fn().mockImplementation(() => ({
       getBalance: mockGetBalance,
+      getTransaction: mockGetTransaction,
       getLatestBlockhash: mockGetLatestBlockhash,
       sendRawTransaction: mockSendRawTransaction,
       confirmTransaction: mockConfirmTransaction,
@@ -233,6 +235,90 @@ describe('AgenticWallet', () => {
       const wallet = createWallet();
       await wallet.initialize();
       expect(wallet.getKeystoreId()).toBe('test-ks-id');
+    });
+  });
+
+  // ── enrichTransactionResult ───────────────────────────────────────────
+
+  describe('enrichTransactionResult', () => {
+    it('returns real metadata from confirmed transaction', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      mockGetTransaction.mockResolvedValueOnce({
+        slot: 12345,
+        meta: { fee: 5000 },
+        blockTime: 1700000000,
+      });
+
+      const result = await wallet.enrichTransactionResult('test-sig');
+      expect(result.slot).toBe(12345);
+      expect(result.fee).toBe(5000);
+      expect(result.blockTime).toBe(1700000000);
+    });
+
+    it('returns defaults when getTransaction returns null', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      mockGetTransaction.mockResolvedValueOnce(null);
+
+      const result = await wallet.enrichTransactionResult('test-sig');
+      expect(result.slot).toBe(0);
+      expect(result.fee).toBe(0);
+      expect(result.blockTime).toBeNull();
+    });
+  });
+
+  // ── Policy enforcement on transferSOL ──────────────────────────────────
+
+  describe('transferSOL policy enforcement', () => {
+    it('enforces policy before Kora path', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      // Set up a policy engine that blocks the transfer
+      const { PolicyEngine } = require('../src/security/policy-engine');
+      const policy = PolicyEngine.createDefaultPolicy();
+      policy.spendingLimits.perTransaction = 0.001; // very low limit
+      const engine = new PolicyEngine('test-agent', policy);
+      wallet.setPolicyEngine(engine);
+
+      // Even with Kora available, policy should block first
+      await expect(wallet.transferSOL('11111111111111111111111111111111', 0.01))
+        .rejects.toThrow('Policy violation');
+    });
+
+    it('rejects invalid destination address', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      await expect(wallet.transferSOL('not-a-valid-address', 0.01))
+        .rejects.toThrow('Invalid destination address');
+    });
+  });
+
+  // ── submitSerializedTransaction ────────────────────────────────────────
+
+  describe('submitSerializedTransaction', () => {
+    it('handles versioned transactions (0x80 flag) via sendRawTransaction', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      // Create a buffer that starts with 0x80 (versioned transaction flag)
+      const versionedBuffer = Buffer.alloc(100);
+      versionedBuffer[0] = 0x80;
+      const base64Tx = versionedBuffer.toString('base64');
+
+      mockSendRawTransaction.mockResolvedValueOnce('versioned-sig');
+      mockConfirmTransaction.mockResolvedValueOnce({ value: {} });
+
+      const sig = await wallet.submitSerializedTransaction(base64Tx);
+      expect(sig).toBe('versioned-sig');
+      expect(mockSendRawTransaction).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        expect.objectContaining({ skipPreflight: false, preflightCommitment: 'confirmed' }),
+      );
     });
   });
 });

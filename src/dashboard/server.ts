@@ -316,6 +316,16 @@ export class DashboardServer {
       }
     });
 
+    // ── Kora Status ──────────────────────────────────────────────────────────
+
+    this.app.get('/api/kora', (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        res.json(this.orchestrator.getKoraStatus());
+      } catch (err) {
+        next(err);
+      }
+    });
+
     // ── Global Error Handler ──────────────────────────────────────────────────
 
     this.app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -585,6 +595,7 @@ if (require.main === module) {
       console.log('    GET  /api/audit');
       console.log('    GET  /api/risk');
       console.log('    GET  /api/alerts');
+      console.log('    GET  /api/kora');
       console.log('='.repeat(52));
       console.log('');
     })

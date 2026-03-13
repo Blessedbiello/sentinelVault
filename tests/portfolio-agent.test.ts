@@ -119,6 +119,8 @@ describe('PortfolioAgent', () => {
 
   it('analyze returns "rebalance_to_tokens" when SOL is overweight', async () => {
     const { agent } = await buildAgent();
+    // Set a pool mint so the guard (tokens===0 && !poolMint) does not fire
+    (agent as any).setPoolMint('TestMintAddress1111111111111111111111111111');
     const decision = await (agent as any).analyze({
       solBalance: 2.0,
       tokenValueSol: 0,
@@ -396,6 +398,28 @@ describe('PortfolioAgent', () => {
     expect((agent as any).pendingOutcomes.length).toBe(1);
   });
 
+  // ── Perpetual drift guard ────────────────────────────────────────────────────
+
+  describe('perpetual drift guard', () => {
+    it('holds when drift exists but no pool configured and no tokens', async () => {
+      const { agent, wallet } = await buildAgent();
+
+      // No pool set — poolMint is null by default
+      // Mock wallet to return no token balances (pure SOL portfolio)
+      (wallet as any).getTokenBalances = jest.fn().mockResolvedValue([]);
+
+      // Observe returns 100% SOL allocation (drift = 40% vs 60/40 target)
+      const obs = await (agent as any).observe();
+
+      // With no tokens and no pool configured, analyze should guard against
+      // perpetually triggering rebalance_to_tokens with no swap venue
+      const decision = await (agent as any).analyze(obs);
+
+      // Without a pool, there is no way to acquire tokens, so the agent should hold
+      expect(decision.action).toBe('hold');
+    });
+  });
+
   // ── Pool Price Valuation ────────────────────────────────────────────────────
 
   describe('pool price valuation', () => {
@@ -435,6 +459,68 @@ describe('PortfolioAgent', () => {
       expect(obs.tokenPriceInSol).toBe(0.001);
       // Source label is still set since poolMint exists
       expect(obs.tokenPriceSource).toBe('Pool price');
+    });
+
+    it('observe uses cached pool price when getPoolState fails after previous success', async () => {
+      const { agent, wallet } = await buildAgent();
+
+      // First call: pool state succeeds with price = 5000 (solReserve/tokenReserve)
+      const mockGetPoolState = jest.fn()
+        .mockResolvedValueOnce({
+          solReserve: 5_000_000_000, // 5 SOL
+          tokenReserve: 1_000_000,
+          feeBps: 30,
+          authority: 'TestAuth',
+          tokenMint: 'TestMint',
+          bump: 255,
+        })
+        .mockRejectedValueOnce(new Error('network error')); // Second call fails
+
+      (wallet as any).getPoolState = mockGetPoolState;
+      (wallet as any).getTokenBalances = jest.fn().mockResolvedValue([
+        { mint: 'TestMint', balance: 1000, decimals: 9, symbol: 'SENT', uiBalance: '0.001' },
+      ]);
+      agent.setPoolMint('TestMint', 'TestAuth');
+
+      // First observe — pool state works
+      await (agent as any).observe();
+      const cachedPrice = (agent as any).cachedTokenPriceInSol;
+      expect(cachedPrice).toBe(5000); // 5_000_000_000 / 1_000_000
+
+      // Second observe — pool state fails, should use cached price
+      const obs2 = await (agent as any).observe();
+      expect(obs2.tokenPriceInSol).toBe(5000);
+    });
+
+    it('processPendingOutcomes evaluates by drift reduction', async () => {
+      const { agent } = await buildAgent();
+      const agentAny = agent as any;
+
+      // Set drift below threshold → outcomes should be "win"
+      agentAny.drift = 0.05; // below 0.10
+
+      agentAny.pendingOutcomes = [{
+        decisionId: 'test-port-po',
+        action: 'rebalance_to_tokens',
+        entryPrice: 150,
+        confidence: 0.8,
+        ticksRemaining: 1,
+        decision: {
+          id: 'test-port-po',
+          agentId: 'port-test-1',
+          timestamp: Date.now(),
+          marketConditions: {},
+          analysis: 'test',
+          action: 'rebalance_to_tokens',
+          confidence: 0.8,
+          reasoning: 'test',
+          executed: true,
+        },
+      }];
+
+      agentAny.processPendingOutcomes(150);
+      expect(agentAny.pendingOutcomes.length).toBe(0);
+      expect(agent.getWeightHistory().length).toBeGreaterThanOrEqual(1);
     });
   });
 });

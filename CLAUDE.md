@@ -41,7 +41,8 @@ src/
     price-feed.ts           # Real SOL/USD from Pyth + Jupiter + CoinGecko
     jupiter.ts              # Jupiter V6 DEX quote/swap client
     amm-client.ts           # TypeScript client for on-chain constant-product AMM
-    ai-advisor.ts           # Optional LLM trade advisor (Claude/OpenAI)
+    ai-advisor.ts           # AI Brain — primary LLM decision-maker (Claude/OpenAI)
+    kora-client.ts          # Kora gasless transaction client (fee abstraction)
   agents/
     base-agent.ts           # Abstract OODA loop base class
     trading-agent.ts        # DCA, momentum, mean reversion + real prices + AI

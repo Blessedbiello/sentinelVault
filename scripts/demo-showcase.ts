@@ -18,6 +18,7 @@ import { DashboardServer } from '../src/dashboard/server';
 import { PriceFeed } from '../src/integrations/price-feed';
 import { JupiterClient } from '../src/integrations/jupiter';
 import { AIAdvisor } from '../src/integrations/ai-advisor';
+import { KoraClient } from '../src/integrations/kora-client';
 import { Connection, Keypair, Transaction, SystemProgram, PublicKey, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from '@solana/web3.js';
 import chalk from 'chalk';
 import * as fs from 'fs';
@@ -373,9 +374,17 @@ async function fundFromDeployer(
     }
 
     if (aiAdvisor.isAvailable()) {
-      ok(`AI advisor: available (provider: ${aiAdvisor.getProvider()})`);
+      ok(`AI Brain: ${chalk.green('ACTIVE')} (provider: ${aiAdvisor.getProvider()}) — all 4 agents are AI-driven`);
     } else {
-      info('AI advisor: not available (set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable)');
+      info('AI Brain: not available (set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable)');
+      info('All agents will use quantitative models as fallback');
+    }
+
+    const koraClient = new KoraClient();
+    if (koraClient.isAvailable()) {
+      ok(`Kora gasless: ${chalk.green('ACTIVE')} (RPC: ${koraClient.getRpcUrl()})`);
+    } else {
+      info('Kora gasless: not configured (set KORA_RPC_URL to enable fee abstraction)');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -853,13 +862,21 @@ async function fundFromDeployer(
       // Show price source and Jupiter/AI status
       const priceSource = latestDecision?.marketConditions?.priceSource as string | undefined;
       const jupiterQuote = latestDecision?.marketConditions?.jupiterQuote as Record<string, unknown> | undefined;
+      const aiDecision = latestDecision?.marketConditions?.aiDecision as Record<string, unknown> | undefined;
       const aiRec = latestDecision?.marketConditions?.aiRecommendation as Record<string, unknown> | undefined;
-      if (priceSource || jupiterQuote || aiRec) {
+      if (priceSource || jupiterQuote || aiDecision || aiRec) {
         const parts: string[] = [];
         if (priceSource) parts.push(`Price: ${priceSource}`);
         if (jupiterQuote) parts.push('Jupiter: ✓');
-        if (aiRec) parts.push(`AI: ${(aiRec.action as string).toUpperCase()}`);
+        if (aiDecision) {
+          parts.push(`AI Brain: ${chalk.green((aiDecision.action as string).toUpperCase())} @ ${((aiDecision.confidence as number) * 100).toFixed(0)}%`);
+        } else if (aiRec) {
+          parts.push(`AI: ${(aiRec.action as string).toUpperCase()}`);
+        }
         console.log(chalk.gray(`    [Integrations] ${parts.join(' | ')}`));
+        if (aiDecision && aiDecision.reasoning) {
+          console.log(chalk.gray(`    [AI Brain] `) + chalk.white(`"${aiDecision.reasoning}"`));
+        }
       }
 
       // System metrics

@@ -26,6 +26,10 @@ import { PortfolioAgent } from './portfolio-agent';
 import { AgenticWallet } from '../core/wallet';
 import { PolicyEngine } from '../security/policy-engine';
 import { AuditLogger } from '../security/audit-logger';
+import { KoraClient } from '../integrations/kora-client';
+import { PriceFeed } from '../integrations/price-feed';
+import { JupiterClient } from '../integrations/jupiter';
+import { AIAdvisor } from '../integrations/ai-advisor';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -101,6 +105,15 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   private readonly startTime: number;
 
+  // ── Kora Gasless Client ────────────────────────────────────────────────────
+
+  private readonly koraClient: KoraClient;
+
+  // ── Shared Integration Services ──────────────────────────────────────────
+  private readonly sharedPriceFeed = new PriceFeed();
+  private readonly sharedJupiterClient = new JupiterClient();
+  private readonly sharedAIAdvisor = new AIAdvisor();
+
   // ── Background Intervals ───────────────────────────────────────────────────
 
   private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -114,6 +127,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.auditLogger = new AuditLogger();
     this.startTime = Date.now();
+    this.koraClient = new KoraClient();
 
     this.auditLogger.logSystemEvent('orchestrator:initialized', {
       config: this.config,
@@ -191,6 +205,11 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     wallet.setPolicyEngine(policyEngine);
     agent.setPolicyEngine(policyEngine);
+
+    // Wire Kora client for gasless transaction support
+    if (this.koraClient.isAvailable()) {
+      wallet.setKoraClient(this.koraClient);
+    }
 
     // ── Event Wiring ──────────────────────────────────────────────────────────
 
@@ -525,6 +544,14 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     return [...this.alerts];
   }
 
+  /** Return the current Kora integration status. */
+  getKoraStatus(): { available: boolean; rpcUrl: string | null } {
+    return {
+      available: this.koraClient.isAvailable(),
+      rpcUrl: this.koraClient.getRpcUrl(),
+    };
+  }
+
   /** Return the wallet for a specific agent. */
   getAgentWallet(agentId: string): AgenticWallet {
     const entry = this.requireAgent(agentId);
@@ -588,17 +615,29 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
    */
   private instantiateAgent(config: AgentConfig, wallet: AgenticWallet): BaseAgent {
     switch (config.type) {
-      case 'trader':
-        return new TradingAgent(config, wallet);
+      case 'trader': {
+        const agent = new TradingAgent(config, wallet);
+        agent.setSharedServices(this.sharedPriceFeed, this.sharedJupiterClient, this.sharedAIAdvisor);
+        return agent;
+      }
 
-      case 'liquidity_provider':
-        return new LiquidityAgent(config, wallet);
+      case 'liquidity_provider': {
+        const agent = new LiquidityAgent(config, wallet);
+        agent.setAIAdvisor(this.sharedAIAdvisor);
+        return agent;
+      }
 
-      case 'arbitrageur':
-        return new ArbitrageAgent(config, wallet);
+      case 'arbitrageur': {
+        const agent = new ArbitrageAgent(config, wallet);
+        agent.setSharedServices(this.sharedPriceFeed, this.sharedJupiterClient, this.sharedAIAdvisor);
+        return agent;
+      }
 
-      case 'portfolio_manager':
-        return new PortfolioAgent(config, wallet);
+      case 'portfolio_manager': {
+        const agent = new PortfolioAgent(config, wallet);
+        agent.setSharedServices(this.sharedPriceFeed, this.sharedAIAdvisor);
+        return agent;
+      }
 
       default: {
         // Exhaustiveness guard — TypeScript should catch unreachable cases.

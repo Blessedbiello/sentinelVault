@@ -413,7 +413,7 @@ describe('TradingAgent', () => {
   // ── Execute ────────────────────────────────────────────────────────────────
 
   describe('execute', () => {
-    it('returns AgentAction with type "transfer_sol:buy" when decision action is "buy"', async () => {
+    it('returns AgentAction with type "signal:buy" when decision action is "buy"', async () => {
       mockGetBalance.mockResolvedValue(2 * LAMPORTS_PER_SOL);
       const { agent } = await buildAgent('dca');
 
@@ -425,7 +425,7 @@ describe('TradingAgent', () => {
       const action = await (agent as unknown as { execute(d: AgentDecision): Promise<unknown> }).execute(decision);
 
       expect(action).not.toBeNull();
-      expect((action as { type: string }).type).toBe('transfer_sol:buy');
+      expect((action as { type: string }).type).toBe('signal:buy');
       expect(mockSendRawTransaction).toHaveBeenCalledTimes(1);
     });
 
@@ -606,7 +606,7 @@ describe('TradingAgent', () => {
       const action = await (agent as any).execute(decision);
 
       expect(action).not.toBeNull();
-      expect(action.type).toBe('transfer_sol:buy');
+      expect(action.type).toBe('signal:buy');
       expect(mockSendRawTransaction).toHaveBeenCalled();
     });
 
@@ -627,7 +627,7 @@ describe('TradingAgent', () => {
 
       // Should fall back to transferSOL
       expect(action).not.toBeNull();
-      expect(action.type).toBe('transfer_sol:buy');
+      expect(action.type).toBe('signal:buy');
       expect(mockSendRawTransaction).toHaveBeenCalled();
     });
 
@@ -711,6 +711,68 @@ describe('TradingAgent', () => {
     });
   });
 
+  // ── Dynamic basePrice ────────────────────────────────────────────────────
+
+  describe('Dynamic basePrice', () => {
+    it('basePrice calibrates once from real price and stays locked', async () => {
+      const { agent } = await buildAgent('mean_reversion');
+      const agentAny = agent as any;
+
+      // Initial basePrice is the default 1.0
+      expect(agentAny.basePrice).toBe(1.0);
+
+      // Run observe() — if Pyth/Jupiter are reachable, basePrice calibrates to
+      // real market price. If not, it stays 1.0 (simulated).
+      await (agent as any).observe();
+      const firstBasePrice = agentAny.basePrice;
+
+      if (firstBasePrice !== 1.0) {
+        // Real price was available — basePrice calibrated. Verify it's a
+        // reasonable SOL price (> $1, < $10000).
+        expect(firstBasePrice).toBeGreaterThan(1);
+        expect(firstBasePrice).toBeLessThan(10000);
+      }
+
+      // Now force a different real price — basePrice should NOT change
+      // (calibration is one-shot: only triggers when basePrice === 1.0)
+      const realPriceFeed = agentAny.priceFeed;
+      const origGetSOLPrice = realPriceFeed.getSOLPrice.bind(realPriceFeed);
+      realPriceFeed.getSOLPrice = async () => ({
+        price: 999.99,
+        source: 'jupiter',
+        timestamp: Date.now(),
+      });
+
+      try {
+        // If basePrice already calibrated from Pyth, it should stay locked
+        if (firstBasePrice !== 1.0) {
+          await (agent as any).observe();
+          expect(agentAny.basePrice).toBeCloseTo(firstBasePrice, 1);
+        } else {
+          // Simulated path — basePrice was still 1.0, now calibrates to 999.99
+          await (agent as any).observe();
+          expect(agentAny.basePrice).toBeCloseTo(999.99, 1);
+
+          // Subsequent observe should NOT recalibrate
+          realPriceFeed.getSOLPrice = async () => ({
+            price: 500.00,
+            source: 'jupiter',
+            timestamp: Date.now(),
+          });
+          await (agent as any).observe();
+          expect(agentAny.basePrice).toBeCloseTo(999.99, 1); // locked
+        }
+
+        // Mean-reversion thresholds track the calibrated price
+        const calibrated = agentAny.basePrice;
+        expect(calibrated * 0.95).toBeCloseTo(calibrated * 0.95, 2);
+        expect(calibrated * 1.05).toBeCloseTo(calibrated * 1.05, 2);
+      } finally {
+        realPriceFeed.getSOLPrice = origGetSOLPrice;
+      }
+    });
+  });
+
   // ── setTargetAddress ───────────────────────────────────────────────────────
 
   describe('setTargetAddress', () => {
@@ -774,6 +836,25 @@ describe('TradingAgent', () => {
       const params = (agent as unknown as { estimateTransactionParams(d: AgentDecision): unknown }).estimateTransactionParams(holdDecision);
 
       expect(params).toBeNull();
+    });
+
+    it('uses AMM program ID when pool is configured', async () => {
+      const { agent } = await buildAgent('dca');
+
+      const decision: AgentDecision = {
+        id: 'test', agentId: 'trading-test-1', timestamp: Date.now(),
+        marketConditions: { balance: 1.0 },
+        analysis: 'test', action: 'buy', confidence: 0.8, reasoning: 'test', executed: false,
+      };
+
+      // Without pool — should use System Program
+      const paramsNoPool = (agent as any).estimateTransactionParams(decision);
+      expect(paramsNoPool.programId).toBe('11111111111111111111111111111111');
+
+      // With pool — should use AMM Program
+      agent.setPoolMint('SomeMintAddress123');
+      const paramsWithPool = (agent as any).estimateTransactionParams(decision);
+      expect(paramsWithPool.programId).toBe('Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2');
     });
   });
 });

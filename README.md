@@ -102,7 +102,7 @@ Or run locally:
 
 ```bash
 npm install           # Install dependencies
-npm test              # Run full test suite (328 tests)
+npm test              # Run full test suite (393 tests)
 npm run demo:showcase # Live demo on Solana devnet (all features)
 ```
 
@@ -684,7 +684,7 @@ npx jest --testPathPattern="security"
 
 ### Test Coverage
 
-Run `npm run test:coverage` to see current coverage. The test suite includes 328 tests across 15 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
+Run `npm run test:coverage` to see current coverage. The test suite includes 393 tests across 16 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
 
 ---
 

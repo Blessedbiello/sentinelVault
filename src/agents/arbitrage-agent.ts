@@ -6,15 +6,17 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { BaseAgent } from './base-agent';
-import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
+import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams, PendingOutcome } from '../types';
 import { AgenticWallet } from '../core/wallet';
 import { PriceFeed } from '../integrations/price-feed';
 import { JupiterClient } from '../integrations/jupiter';
 import { AmmClient } from '../integrations/amm-client';
+import { AIAdvisor } from '../integrations/ai-advisor';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SYSTEM_PROGRAM_ADDRESS = '11111111111111111111111111111111';
+const AMM_PROGRAM_ID = 'Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2';
 const PROFIT_THRESHOLD = 0.01;
 const ARB_TRANSFER_SOL = 0.005;
 const ALT_DEX_SPREAD_RANGE = 0.03;
@@ -41,9 +43,11 @@ export class ArbitrageAgent extends BaseAgent {
   // AMM pool integration
   private poolMint: string | null = null;
   private poolAuthority: string | null = null;
+  private altDexSpread: number = 0.005;
 
-  private readonly priceFeed: PriceFeed;
-  private readonly jupiterClient: JupiterClient;
+  private priceFeed: PriceFeed;
+  private jupiterClient: JupiterClient;
+  private aiAdvisor: AIAdvisor;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super(config, wallet);
@@ -56,6 +60,7 @@ export class ArbitrageAgent extends BaseAgent {
 
     this.priceFeed = new PriceFeed();
     this.jupiterClient = new JupiterClient();
+    this.aiAdvisor = new AIAdvisor();
   }
 
   // ── OODA: Observe ──────────────────────────────────────────────────────────
@@ -101,9 +106,12 @@ export class ArbitrageAgent extends BaseAgent {
     if (this.poolPrice > 0) {
       this.altDexPrice = this.poolPrice;
     } else {
-      const spreadDirection = Math.random() > 0.5 ? 1 : -1;
-      const spreadMagnitude = 0.005 + Math.random() * ALT_DEX_SPREAD_RANGE;
-      this.altDexPrice = price * (1 + spreadDirection * spreadMagnitude);
+      // Persistent EMA-based spread (mean-reverting drift, not random each cycle)
+      const SPREAD_DECAY = 0.95;
+      const SPREAD_NOISE = (Math.random() - 0.5) * 0.002; // ±0.1% noise
+      this.altDexSpread = this.altDexSpread * SPREAD_DECAY + SPREAD_NOISE;
+      this.altDexSpread = Math.max(-ALT_DEX_SPREAD_RANGE, Math.min(ALT_DEX_SPREAD_RANGE, this.altDexSpread));
+      this.altDexPrice = price * (1 + this.altDexSpread);
     }
 
     // Detect market regime
@@ -139,6 +147,7 @@ export class ArbitrageAgent extends BaseAgent {
       `[Jupiter]  $${jupPrice.toFixed(2)}`,
       `[AltDex]   $${altPrice.toFixed(2)}`,
       `[Spread]   ${(spread * 100).toFixed(3)}% (threshold: ${(PROFIT_THRESHOLD * 100).toFixed(1)}%)`,
+      ...(this.poolPrice === 0 ? [`[Spread Model] Simulated EMA spread (no secondary DEX pool configured)`] : []),
     ];
 
     let action: string;
@@ -165,6 +174,43 @@ export class ArbitrageAgent extends BaseAgent {
       confidence = 0.3;
       reasoning = `No arbitrage: spread ${(spread * 100).toFixed(3)}% below threshold ${(PROFIT_THRESHOLD * 100).toFixed(1)}%.`;
       reasoningChain.push(`[Decision]   HOLD — spread below threshold`);
+    }
+
+    // ── AI Brain (optional) ──────────────────────────────────────────────
+    try {
+      const aiDecision = await this.aiAdvisor.getAgentDecision({
+        agentName: this.config.name,
+        agentType: 'arbitrageur',
+        strategy: 'cross_dex_arbitrage',
+        solPrice: price,
+        priceSource,
+        priceHistory: this.priceHistory,
+        marketRegime: this.currentRegime,
+        solBalance: balance,
+        tokenBalances: [],
+        totalPortfolioValueSol: balance,
+        quantitativeSignal: {
+          action,
+          confidence,
+          factors: { spread, jupiterPrice: jupPrice, altDexPrice: altPrice },
+        },
+        poolState: this.poolPrice > 0 ? { solReserve: 0, tokenReserve: 0, price: this.poolPrice } : null,
+        jupiterQuote: null,
+        recentDecisions: this.getDecisionHistory().slice(-3).map(d => ({ action: d.action, confidence: d.confidence })),
+        reasoningChain,
+      });
+
+      if (aiDecision) {
+        action = aiDecision.action;
+        confidence = aiDecision.confidence;
+        reasoning = aiDecision.reasoning;
+        reasoningChain.push(`[AI Brain]    Decision: ${aiDecision.action.toUpperCase()} (confidence: ${aiDecision.confidence.toFixed(3)})`);
+        reasoningChain.push(`[AI Brain]    "${aiDecision.reasoning}"`);
+        if (aiDecision.riskAssessment) reasoningChain.push(`[AI Brain]    Risk: "${aiDecision.riskAssessment}"`);
+        if (aiDecision.marketOutlook) reasoningChain.push(`[AI Brain]    Outlook: "${aiDecision.marketOutlook}"`);
+      }
+    } catch {
+      // AI advisor is optional
     }
 
     return {
@@ -262,6 +308,9 @@ export class ArbitrageAgent extends BaseAgent {
       // Memo is best-effort
     }
 
+    let txMeta = { slot: 0, fee: 0, blockTime: null as number | null };
+    try { txMeta = await this.wallet.enrichTransactionResult(signature); } catch { /* best-effort */ }
+
     return {
       id: uuidv4(),
       agentId: this.config.id,
@@ -283,9 +332,9 @@ export class ArbitrageAgent extends BaseAgent {
         id: uuidv4(),
         signature,
         status: 'confirmed',
-        slot: 0,
-        blockTime: null,
-        fee: 0,
+        slot: txMeta.slot,
+        blockTime: txMeta.blockTime,
+        fee: txMeta.fee,
         error: null,
         logs: [],
         duration: 0,
@@ -308,6 +357,24 @@ export class ArbitrageAgent extends BaseAgent {
     this.queuePendingOutcome(decision, this.currentPrice);
   }
 
+  /** Arbitrage-specific outcome evaluation: spread convergence = success. */
+  protected processPendingOutcomes(currentPrice: number): void {
+    const remaining: PendingOutcome[] = [];
+    for (const po of this.pendingOutcomes) {
+      po.ticksRemaining -= 1;
+      if (po.ticksRemaining <= 0) {
+        // Arbitrage profits from spread convergence (small price movement = stable = arb worked)
+        const priceChange = Math.abs(currentPrice - po.entryPrice) / Math.max(po.entryPrice, 0.0001);
+        const outcome: 'win' | 'loss' = priceChange < 0.02 ? 'win' : 'loss';
+        this.updateWeights(outcome, po.decision);
+        this.recordCalibration(po.confidence, outcome === 'win');
+      } else {
+        remaining.push(po);
+      }
+    }
+    this.pendingOutcomes = remaining;
+  }
+
   // ── Policy Engine ──────────────────────────────────────────────────────────
 
   protected estimateTransactionParams(
@@ -316,7 +383,7 @@ export class ArbitrageAgent extends BaseAgent {
     if (decision.action === 'hold') return null;
     return {
       amountSol: ARB_TRANSFER_SOL,
-      programId: SYSTEM_PROGRAM_ADDRESS,
+      programId: this.poolMint ? AMM_PROGRAM_ID : SYSTEM_PROGRAM_ADDRESS,
       destination: this.targetAddress,
     };
   }
@@ -331,5 +398,12 @@ export class ArbitrageAgent extends BaseAgent {
   setPoolMint(mint: string, authority?: string): void {
     this.poolMint = mint;
     this.poolAuthority = authority ?? null;
+  }
+
+  /** Inject shared service instances from orchestrator. Avoids duplicate HTTP clients/caches. */
+  setSharedServices(priceFeed: PriceFeed, jupiterClient: JupiterClient, aiAdvisor: AIAdvisor): void {
+    this.priceFeed = priceFeed;
+    this.jupiterClient = jupiterClient;
+    this.aiAdvisor = aiAdvisor;
   }
 }

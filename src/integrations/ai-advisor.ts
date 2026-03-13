@@ -8,6 +8,8 @@ const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 const FETCH_TIMEOUT_MS = 8_000;
 
+import { AgentDecisionContext, AIDecisionResult } from '../types';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface TradeContext {
@@ -153,7 +155,7 @@ export class AIAdvisor {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-haiku-4-5',
         max_tokens: 300,
         messages: [{ role: 'user', content: prompt }],
       }),
@@ -213,6 +215,185 @@ export class AIAdvisor {
       if (!isFinite(confidence) || confidence < 0 || confidence > 1) return null;
 
       return { action, confidence, reasoning };
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Rich-Context Decision ────────────────────────────────────────────────────
+
+  /**
+   * Get a rich, context-aware decision from the LLM using the full agent state.
+   * Returns null if no API key is set or if the request fails.
+   */
+  async getAgentDecision(ctx: AgentDecisionContext): Promise<AIDecisionResult | null> {
+    if (!this.apiKey || !this.provider) return null;
+
+    const prompt = this.buildAgentPrompt(ctx);
+
+    try {
+      let result: AIDecisionResult | null;
+      if (this.provider === 'anthropic') {
+        result = await this.callAnthropicDecision(prompt);
+      } else {
+        result = await this.callOpenAIDecision(prompt);
+      }
+
+      // Track this decision for future context
+      if (result) {
+        this.recentDecisions.push({ action: result.action, confidence: result.confidence });
+        if (this.recentDecisions.length > 10) {
+          this.recentDecisions.splice(0, this.recentDecisions.length - 10);
+        }
+      }
+
+      return result;
+    } catch {
+      return null;
+    }
+  }
+
+  private buildAgentPrompt(ctx: AgentDecisionContext): string {
+    const recentPrices = ctx.priceHistory.slice(-10).map(p => p.toFixed(2)).join(', ');
+
+    const tokenHoldingsStr = ctx.tokenBalances.length > 0
+      ? ctx.tokenBalances.map(t => `${t.symbol} (${t.mint.slice(0, 8)}…): ${t.balance.toFixed(6)}`).join(', ')
+      : 'none';
+
+    const poolStr = ctx.poolState
+      ? `solReserve=${ctx.poolState.solReserve.toFixed(4)}, tokenReserve=${ctx.poolState.tokenReserve.toFixed(4)}, price=${ctx.poolState.price.toFixed(6)} SOL/token`
+      : 'not configured';
+
+    const jupiterStr = ctx.jupiterQuote
+      ? `outAmount=${ctx.jupiterQuote.outAmount}, priceImpact=${ctx.jupiterQuote.priceImpactPct}%, route=${ctx.jupiterQuote.route}`
+      : 'unavailable';
+
+    const factorsStr = Object.entries(ctx.quantitativeSignal.factors)
+      .map(([k, v]) => `${k}=${v.toFixed(4)}`)
+      .join(', ');
+
+    const recentDecisionsStr = ctx.recentDecisions.slice(-3)
+      .map(d => `${d.action} (conf=${d.confidence.toFixed(2)}${d.outcome ? `, outcome=${d.outcome}` : ''})`)
+      .join('; ');
+
+    const reasoningStr = ctx.reasoningChain.join('\n');
+
+    const lines = [
+      `You are an autonomous AI agent managing a Solana DeFi wallet.`,
+      `Agent: ${ctx.agentName} | Type: ${ctx.agentType} | Strategy: ${ctx.strategy}`,
+      ``,
+      `MARKET DATA:`,
+      `- SOL/USD: $${ctx.solPrice.toFixed(2)} (${ctx.priceSource})`,
+      `- 10-tick history: [${recentPrices}]`,
+      `- Market regime: ${ctx.marketRegime}`,
+      ``,
+      `PORTFOLIO:`,
+      `- SOL balance: ${ctx.solBalance.toFixed(4)}`,
+      `- Token holdings: [${tokenHoldingsStr}]`,
+      `- Total value: ${ctx.totalPortfolioValueSol.toFixed(4)} SOL`,
+      ``,
+      `ON-CHAIN STATE:`,
+      `- AMM Pool: ${poolStr}`,
+      `- Jupiter: ${jupiterStr}`,
+      ``,
+      `QUANTITATIVE MODEL (reference only):`,
+      `- Signal: ${ctx.quantitativeSignal.action} at ${ctx.quantitativeSignal.confidence.toFixed(3)} confidence`,
+      `- Factors: ${factorsStr}`,
+      ``,
+      `RECENT HISTORY:`,
+      `- Last 3 decisions: [${recentDecisionsStr || 'none'}]`,
+      ``,
+      `CURRENT REASONING:`,
+      reasoningStr,
+      ``,
+      `Based on all context, decide the next action. Output ONLY valid JSON:`,
+      `{"action": "buy"|"sell"|"hold"|"arbitrage"|"rebalance_to_tokens"|"rebalance_to_sol", "confidence": 0.0-1.0, "reasoning": "2-3 sentence explanation", "riskAssessment": "one-line risk note", "marketOutlook": "brief forward-looking statement"}`,
+    ];
+
+    return lines.join('\n');
+  }
+
+  private async callAnthropicDecision(prompt: string): Promise<AIDecisionResult | null> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    const res = await fetch(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.apiKey!,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) return null;
+
+    const json = await res.json() as { content?: { type: string; text: string }[] };
+    const text = json.content?.find(c => c.type === 'text')?.text;
+    if (!text) return null;
+
+    return this.parseDecisionResult(text);
+  }
+
+  private async callOpenAIDecision(prompt: string): Promise<AIDecisionResult | null> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    const res = await fetch(OPENAI_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey!}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) return null;
+
+    const json = await res.json() as { choices?: { message?: { content?: string } }[] };
+    const text = json.choices?.[0]?.message?.content;
+    if (!text) return null;
+
+    return this.parseDecisionResult(text);
+  }
+
+  private parseDecisionResult(text: string): AIDecisionResult | null {
+    const VALID_ACTIONS = new Set([
+      'buy', 'sell', 'hold', 'arbitrage', 'rebalance_to_tokens', 'rebalance_to_sol',
+      'rebalance', 'add_liquidity', 'remove_liquidity',
+    ]);
+
+    try {
+      // Extract JSON from response (handles markdown code blocks)
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+
+      const action = String(parsed.action ?? '').toLowerCase();
+      const confidence = Number(parsed.confidence ?? 0);
+      const reasoning = String(parsed.reasoning ?? '');
+      const riskAssessment = String(parsed.riskAssessment ?? '');
+      const marketOutlook = String(parsed.marketOutlook ?? '');
+
+      if (!VALID_ACTIONS.has(action)) return null;
+      if (!isFinite(confidence) || confidence < 0 || confidence > 1) return null;
+      if (!reasoning || !riskAssessment || !marketOutlook) return null;
+
+      return { action, confidence, reasoning, riskAssessment, marketOutlook };
     } catch {
       return null;
     }

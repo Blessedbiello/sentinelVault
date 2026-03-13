@@ -7,7 +7,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { BaseAgent } from './base-agent';
-import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
+import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams, AIDecisionResult, PendingOutcome } from '../types';
 import { AgenticWallet } from '../core/wallet';
 import { PriceFeed } from '../integrations/price-feed';
 import { JupiterClient, SOL_MINT, USDC_MINT } from '../integrations/jupiter';
@@ -17,6 +17,9 @@ import { AIAdvisor } from '../integrations/ai-advisor';
 
 /** Solana System Program — a safe, always-valid devnet destination address. */
 const DEVNET_FALLBACK_ADDRESS = '11111111111111111111111111111111';
+
+/** On-chain constant-product AMM program deployed to devnet. */
+const AMM_PROGRAM_ID = 'Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2';
 
 const PRICE_HISTORY_MAX = 100;
 const MAX_TRADE_AMOUNT_SOL = 0.01;
@@ -78,7 +81,7 @@ export class TradingAgent extends BaseAgent {
 
   private priceHistory: number[];
   private currentPrice: number;
-  private readonly basePrice: number;
+  private basePrice: number;
 
   // ── Strategy configuration ─────────────────────────────────────────────────
 
@@ -93,9 +96,9 @@ export class TradingAgent extends BaseAgent {
 
   // ── Integration clients ─────────────────────────────────────────────────────
 
-  private readonly priceFeed: PriceFeed;
-  private readonly jupiterClient: JupiterClient;
-  private readonly aiAdvisor: AIAdvisor;
+  private priceFeed: PriceFeed;
+  private jupiterClient: JupiterClient;
+  private aiAdvisor: AIAdvisor;
 
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -199,6 +202,11 @@ export class TradingAgent extends BaseAgent {
       }
       this.priceHistory.push(price);
       this.currentPrice = price;
+
+      // Calibrate basePrice from first real price so mean-reversion tracks real market
+      if (priceSource !== 'simulated' && this.basePrice === 1.0) {
+        this.basePrice = price;
+      }
     } else {
       // Fall back to simulated price
       price = this.simulatePrice();
@@ -326,26 +334,67 @@ export class TradingAgent extends BaseAgent {
       // Jupiter quote is optional — no impact on decision
     }
 
-    // ── AI Advisor (optional LLM blend) ───────────────────────────────────
-    let aiRecommendation: { action: string; confidence: number; reasoning: string } | null = null;
-    let finalConfidence = rawConfidence;
+    // ── AI Brain (primary decision-maker when available) ───────────────────
+    let aiDecision: AIDecisionResult | null = null;
+    let aiDriven = false;
 
     try {
-      aiRecommendation = await this.aiAdvisor.getTradeRecommendation({
+      aiDecision = await this.aiAdvisor.getAgentDecision({
+        agentName: this.config.name,
+        agentType: 'trader',
+        strategy: this.strategyType,
         solPrice: price,
         priceSource,
         priceHistory: this.priceHistory,
-        balance,
-        strategy: this.strategyType,
-        quantitativeSignal: { action: trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold', confidence: rawConfidence },
+        marketRegime: this.currentRegime,
+        solBalance: balance,
+        tokenBalances: [],
+        totalPortfolioValueSol: balance,
+        quantitativeSignal: {
+          action: trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold',
+          confidence: rawConfidence,
+          factors: { trend: trendScore, momentum: momentumScore, volatility: volatilityScore, balance: balanceScore },
+        },
+        poolState: null,
+        jupiterQuote: jupiterQuoteInfo ? { outAmount: String(jupiterQuoteInfo.outAmount), priceImpactPct: String(jupiterQuoteInfo.priceImpactPct), route: String(jupiterQuoteInfo.route) } : null,
+        recentDecisions: this.getDecisionHistory().slice(-3).map(d => ({ action: d.action, confidence: d.confidence })),
+        reasoningChain,
       });
-      if (aiRecommendation) {
-        finalConfidence = 0.6 * rawConfidence + 0.4 * aiRecommendation.confidence;
-        reasoningChain.push(`[AI Advisor] ${aiRecommendation.action.toUpperCase()} (confidence: ${aiRecommendation.confidence.toFixed(3)}) — "${aiRecommendation.reasoning}"`);
-        reasoningChain.push(`[Blended]    confidence=${finalConfidence.toFixed(3)} = 0.6×${rawConfidence.toFixed(3)} + 0.4×${aiRecommendation.confidence.toFixed(3)}`);
+
+      if (aiDecision) {
+        aiDriven = true;
+        reasoningChain.push(`[AI Brain]    Decision: ${aiDecision.action.toUpperCase()} (confidence: ${aiDecision.confidence.toFixed(3)})`);
+        reasoningChain.push(`[AI Brain]    "${aiDecision.reasoning}"`);
+        reasoningChain.push(`[AI Brain]    Risk: "${aiDecision.riskAssessment}"`);
+        reasoningChain.push(`[AI Brain]    Outlook: "${aiDecision.marketOutlook}"`);
+        reasoningChain.push(`[Quant Ref]   Quantitative model suggested: ${trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold'} @ ${rawConfidence.toFixed(3)} (for reference)`);
       }
     } catch {
-      // AI advisor is optional — no impact on decision
+      // AI advisor is optional — fall through to quantitative mode
+    }
+
+    // Legacy AI blend fallback (when getAgentDecision returns null but getTradeRecommendation works)
+    let aiRecommendation: { action: string; confidence: number; reasoning: string } | null = null;
+    let finalConfidence = rawConfidence;
+
+    if (!aiDriven) {
+      try {
+        aiRecommendation = await this.aiAdvisor.getTradeRecommendation({
+          solPrice: price,
+          priceSource,
+          priceHistory: this.priceHistory,
+          balance,
+          strategy: this.strategyType,
+          quantitativeSignal: { action: trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold', confidence: rawConfidence },
+        });
+        if (aiRecommendation) {
+          finalConfidence = 0.6 * rawConfidence + 0.4 * aiRecommendation.confidence;
+          reasoningChain.push(`[AI Advisor] ${aiRecommendation.action.toUpperCase()} (confidence: ${aiRecommendation.confidence.toFixed(3)}) — "${aiRecommendation.reasoning}"`);
+          reasoningChain.push(`[Blended]    confidence=${finalConfidence.toFixed(3)} = 0.6×${rawConfidence.toFixed(3)} + 0.4×${aiRecommendation.confidence.toFixed(3)}`);
+        }
+      } catch {
+        // AI advisor is optional — no impact on decision
+      }
     }
 
     // ── Strategy-specific action decision ─────────────────────────────────
@@ -353,83 +402,92 @@ export class TradingAgent extends BaseAgent {
     let confidence: number;
     let reasoning: string;
 
-    // Use blended confidence if AI advisor contributed, then apply regime + calibration
-    const preAdjusted = aiRecommendation ? finalConfidence : rawConfidence;
-    const trendAction = trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold';
-    const regimeScaled = this.applyRegimeScaling(preAdjusted, trendAction);
-    const effectiveConfidence = this.getCalibrationAdjustment(regimeScaled);
+    if (aiDriven && aiDecision) {
+      // AI is the primary decision-maker
+      action = (['buy', 'sell'].includes(aiDecision.action) ? aiDecision.action : 'hold') as 'buy' | 'sell' | 'hold';
+      confidence = aiDecision.confidence;
+      reasoning = aiDecision.reasoning;
+      reasoningChain.push(`[Decision]   AI-driven: ${action.toUpperCase()} @ ${confidence.toFixed(3)}`);
+    } else {
+      // Quantitative fallback (existing logic)
+      // Use blended confidence if AI advisor contributed, then apply regime + calibration
+      const preAdjusted = aiRecommendation ? finalConfidence : rawConfidence;
+      const trendAction = trendDirection === 'bullish' ? 'buy' : trendDirection === 'bearish' ? 'sell' : 'hold';
+      const regimeScaled = this.applyRegimeScaling(preAdjusted, trendAction);
+      const effectiveConfidence = this.getCalibrationAdjustment(regimeScaled);
 
-    if (regimeScaled !== preAdjusted) {
-      reasoningChain.push(`[Regime Adj] ${this.currentRegime} → confidence ${preAdjusted.toFixed(3)} → ${regimeScaled.toFixed(3)}`);
-    }
-    if (effectiveConfidence !== regimeScaled) {
-      reasoningChain.push(`[Calibrated] adjusted to ${effectiveConfidence.toFixed(3)} based on historical accuracy`);
-    }
-
-    switch (this.strategyType) {
-      case 'dca': {
-        action = 'buy';
-        confidence = Math.max(DCA_CONFIDENCE, effectiveConfidence);
-        reasoning =
-          `DCA strategy: accumulate regardless of direction. Price: $${price.toFixed(2)} (${priceSource}). ` +
-          `Multi-factor confidence: ${effectiveConfidence.toFixed(3)}.`;
-        reasoningChain.push(`[Decision]   DCA always buys — confidence boosted to ${confidence.toFixed(3)}`);
-        break;
+      if (regimeScaled !== preAdjusted) {
+        reasoningChain.push(`[Regime Adj] ${this.currentRegime} → confidence ${preAdjusted.toFixed(3)} → ${regimeScaled.toFixed(3)}`);
+      }
+      if (effectiveConfidence !== regimeScaled) {
+        reasoningChain.push(`[Calibrated] adjusted to ${effectiveConfidence.toFixed(3)} based on historical accuracy`);
       }
 
-      case 'momentum': {
-        if (effectiveConfidence > 0.55 && trendDirection === 'bullish') {
+      switch (this.strategyType) {
+        case 'dca': {
           action = 'buy';
-          confidence = effectiveConfidence;
+          confidence = Math.max(DCA_CONFIDENCE, effectiveConfidence);
           reasoning =
-            `Momentum bullish: composite score ${effectiveConfidence.toFixed(3)} with uptrend. ` +
-            `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} > SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
-          reasoningChain.push(`[Decision]   BUY — bullish trend with confidence ${confidence.toFixed(3)}`);
-        } else if (effectiveConfidence < 0.45 && trendDirection === 'bearish') {
-          action = 'sell';
-          confidence = 1 - effectiveConfidence; // invert: low composite → high sell confidence
-          reasoning =
-            `Momentum bearish: composite score ${effectiveConfidence.toFixed(3)} with downtrend. ` +
-            `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} < SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
-          reasoningChain.push(`[Decision]   SELL — bearish trend with confidence ${confidence.toFixed(3)}`);
-        } else {
-          action = 'hold';
-          confidence = HOLD_CONFIDENCE;
-          reasoning =
-            `Momentum indeterminate: composite ${effectiveConfidence.toFixed(3)}, trend ${trendDirection}. Holding.`;
-          reasoningChain.push(`[Decision]   HOLD — no clear signal`);
+            `DCA strategy: accumulate regardless of direction. Price: $${price.toFixed(2)} (${priceSource}). ` +
+            `Multi-factor confidence: ${effectiveConfidence.toFixed(3)}.`;
+          reasoningChain.push(`[Decision]   DCA always buys — confidence boosted to ${confidence.toFixed(3)}`);
+          break;
         }
-        break;
-      }
 
-      case 'mean_reversion': {
-        const buyLevel = this.basePrice * MEAN_REVERSION_BUY_THRESHOLD;
-        const sellLevel = this.basePrice * MEAN_REVERSION_SELL_THRESHOLD;
-
-        if (price < buyLevel) {
-          const deviation = (buyLevel - price) / this.basePrice;
-          confidence = Math.min(0.95, effectiveConfidence + deviation * 5);
-          action = 'buy';
-          reasoning =
-            `Mean reversion: price $${price.toFixed(2)} below buy threshold ${buyLevel.toFixed(4)} ` +
-            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${effectiveConfidence.toFixed(3)}.`;
-          reasoningChain.push(`[Decision]   BUY — price below mean reversion threshold, confidence ${confidence.toFixed(3)}`);
-        } else if (price > sellLevel) {
-          const deviation = (price - sellLevel) / this.basePrice;
-          confidence = Math.min(0.95, (1 - effectiveConfidence) + deviation * 5);
-          action = 'sell';
-          reasoning =
-            `Mean reversion: price $${price.toFixed(2)} above sell threshold ${sellLevel.toFixed(4)} ` +
-            `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${effectiveConfidence.toFixed(3)}.`;
-          reasoningChain.push(`[Decision]   SELL — price above mean reversion threshold, confidence ${confidence.toFixed(3)}`);
-        } else {
-          action = 'hold';
-          confidence = HOLD_CONFIDENCE;
-          reasoning =
-            `Mean reversion: price $${price.toFixed(2)} in neutral zone [${buyLevel.toFixed(4)}, ${sellLevel.toFixed(4)}]. Holding.`;
-          reasoningChain.push(`[Decision]   HOLD — price in neutral zone`);
+        case 'momentum': {
+          if (effectiveConfidence > 0.55 && trendDirection === 'bullish') {
+            action = 'buy';
+            confidence = effectiveConfidence;
+            reasoning =
+              `Momentum bullish: composite score ${effectiveConfidence.toFixed(3)} with uptrend. ` +
+              `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} > SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
+            reasoningChain.push(`[Decision]   BUY — bullish trend with confidence ${confidence.toFixed(3)}`);
+          } else if (effectiveConfidence < 0.45 && trendDirection === 'bearish') {
+            action = 'sell';
+            confidence = 1 - effectiveConfidence; // invert: low composite → high sell confidence
+            reasoning =
+              `Momentum bearish: composite score ${effectiveConfidence.toFixed(3)} with downtrend. ` +
+              `SMA${SMA_SHORT_PERIOD}=${sma20.toFixed(4)} < SMA${SMA_LONG_PERIOD}=${sma50.toFixed(4)}.`;
+            reasoningChain.push(`[Decision]   SELL — bearish trend with confidence ${confidence.toFixed(3)}`);
+          } else {
+            action = 'hold';
+            confidence = HOLD_CONFIDENCE;
+            reasoning =
+              `Momentum indeterminate: composite ${effectiveConfidence.toFixed(3)}, trend ${trendDirection}. Holding.`;
+            reasoningChain.push(`[Decision]   HOLD — no clear signal`);
+          }
+          break;
         }
-        break;
+
+        case 'mean_reversion': {
+          const buyLevel = this.basePrice * MEAN_REVERSION_BUY_THRESHOLD;
+          const sellLevel = this.basePrice * MEAN_REVERSION_SELL_THRESHOLD;
+
+          if (price < buyLevel) {
+            const deviation = (buyLevel - price) / this.basePrice;
+            confidence = Math.min(0.95, effectiveConfidence + deviation * 5);
+            action = 'buy';
+            reasoning =
+              `Mean reversion: price $${price.toFixed(2)} below buy threshold ${buyLevel.toFixed(4)} ` +
+              `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${effectiveConfidence.toFixed(3)}.`;
+            reasoningChain.push(`[Decision]   BUY — price below mean reversion threshold, confidence ${confidence.toFixed(3)}`);
+          } else if (price > sellLevel) {
+            const deviation = (price - sellLevel) / this.basePrice;
+            confidence = Math.min(0.95, (1 - effectiveConfidence) + deviation * 5);
+            action = 'sell';
+            reasoning =
+              `Mean reversion: price $${price.toFixed(2)} above sell threshold ${sellLevel.toFixed(4)} ` +
+              `(deviation ${(deviation * 100).toFixed(2)}%). Composite: ${effectiveConfidence.toFixed(3)}.`;
+            reasoningChain.push(`[Decision]   SELL — price above mean reversion threshold, confidence ${confidence.toFixed(3)}`);
+          } else {
+            action = 'hold';
+            confidence = HOLD_CONFIDENCE;
+            reasoning =
+              `Mean reversion: price $${price.toFixed(2)} in neutral zone [${buyLevel.toFixed(4)}, ${sellLevel.toFixed(4)}]. Holding.`;
+            reasoningChain.push(`[Decision]   HOLD — price in neutral zone`);
+          }
+          break;
+        }
       }
     }
 
@@ -450,14 +508,17 @@ export class TradingAgent extends BaseAgent {
         volatilityScore,
         balanceScore,
         compositeConfidence: rawConfidence,
-        aiRecommendation: aiRecommendation ? { action: aiRecommendation.action, confidence: aiRecommendation.confidence } : null,
+        aiRecommendation: !aiDriven && aiRecommendation
+          ? { action: aiRecommendation.action, confidence: aiRecommendation.confidence }
+          : null,
+        aiDecision: aiDriven && aiDecision ? aiDecision : null,
         blendedConfidence: aiRecommendation ? finalConfidence : null,
         jupiterQuote: jupiterQuoteInfo,
         reasoningChain,
       },
       analysis: `Strategy: ${this.strategyType} | Price: $${price.toFixed(2)} (${priceSource}) | ` +
         `SMA20: ${sma20.toFixed(4)} | SMA50: ${sma50.toFixed(4)} | ` +
-        `Composite: ${rawConfidence.toFixed(3)}${aiRecommendation ? ` | Blended: ${finalConfidence.toFixed(3)}` : ''} | Balance: ${balance.toFixed(6)} SOL`,
+        `Composite: ${rawConfidence.toFixed(3)}${aiDriven ? ` | AI-driven: ${confidence.toFixed(3)}` : aiRecommendation ? ` | Blended: ${finalConfidence.toFixed(3)}` : ''} | Balance: ${balance.toFixed(6)} SOL`,
       action,
       confidence,
       reasoning,
@@ -499,7 +560,7 @@ export class TradingAgent extends BaseAgent {
     }
 
     let signature: string | undefined;
-    let actionType: string = decision.action === 'buy' ? 'transfer_sol:buy' : 'transfer_sol:sell';
+    let actionType: string = decision.action === 'buy' ? 'signal:buy' : 'signal:sell';
 
     // Try Jupiter swap first (works on mainnet, fails on devnet)
     let jupiterAttempted = false;
@@ -555,7 +616,7 @@ export class TradingAgent extends BaseAgent {
         // Fall back to plain transfer
         try {
           signature = await this.wallet.transferSOL(this.targetAddress, amount);
-          actionType = 'transfer_sol:buy';
+          actionType = 'signal:buy';
         } catch (err2) {
           const message2 = err2 instanceof Error ? err2.message : String(err2);
           console.error(`[${this.config.name}] Transfer also failed: ${message2}`);
@@ -566,7 +627,7 @@ export class TradingAgent extends BaseAgent {
       // No pool, no Jupiter — fall back to transferSOL
       try {
         signature = await this.wallet.transferSOL(this.targetAddress, amount);
-        actionType = 'transfer_sol:buy';
+        actionType = 'signal:buy';
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[${this.config.name}] Transfer failed: ${message}`);
@@ -598,7 +659,7 @@ export class TradingAgent extends BaseAgent {
         } else {
           // No tokens to sell, fall back to transferSOL
           signature = await this.wallet.transferSOL(this.targetAddress, amount);
-          actionType = 'transfer_sol:sell';
+          actionType = 'signal:sell';
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -607,7 +668,7 @@ export class TradingAgent extends BaseAgent {
         );
         try {
           signature = await this.wallet.transferSOL(this.targetAddress, amount);
-          actionType = 'transfer_sol:sell';
+          actionType = 'signal:sell';
         } catch (err2) {
           const message2 = err2 instanceof Error ? err2.message : String(err2);
           console.error(`[${this.config.name}] Transfer also failed: ${message2}`);
@@ -618,7 +679,7 @@ export class TradingAgent extends BaseAgent {
       // No poolMint for sell — use traditional transfer
       try {
         signature = await this.wallet.transferSOL(this.targetAddress, amount);
-        actionType = decision.action === 'buy' ? 'transfer_sol:buy' : 'transfer_sol:sell';
+        actionType = decision.action === 'buy' ? 'signal:buy' : 'signal:sell';
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(
@@ -626,6 +687,11 @@ export class TradingAgent extends BaseAgent {
         );
         return null;
       }
+
+      // Signal intent — this is a plain transfer, not a real swap
+      try {
+        await this.wallet.sendMemo(`INTENT: ${decision.action} ${amount.toFixed(6)} SOL — no swap venue available`);
+      } catch { /* best-effort */ }
 
       // Record swap intent on-chain as a memo for verifiability.
       const jupiterQuote = decision.marketConditions.jupiterQuote as Record<string, unknown> | null;
@@ -644,6 +710,9 @@ export class TradingAgent extends BaseAgent {
       console.error(`[${this.config.name}] No signature obtained for ${decision.action}`);
       return null;
     }
+
+    let txMeta = { slot: 0, fee: 0, blockTime: null as number | null };
+    try { txMeta = await this.wallet.enrichTransactionResult(signature); } catch { /* best-effort */ }
 
     const action: AgentAction = {
       id: uuidv4(),
@@ -666,9 +735,9 @@ export class TradingAgent extends BaseAgent {
         id: uuidv4(),
         signature,
         status: 'confirmed',
-        slot: 0,
-        blockTime: null,
-        fee: 0,
+        slot: txMeta.slot,
+        blockTime: txMeta.blockTime,
+        fee: txMeta.fee,
         error: null,
         logs: [],
         duration: 0,
@@ -689,6 +758,13 @@ export class TradingAgent extends BaseAgent {
   setPoolMint(mint: string, authority?: string): void {
     this.poolMint = mint;
     this.poolAuthority = authority ?? null;
+  }
+
+  /** Inject shared service instances from orchestrator. Avoids duplicate HTTP clients/caches. */
+  setSharedServices(priceFeed: PriceFeed, jupiterClient: JupiterClient, aiAdvisor: AIAdvisor): void {
+    this.priceFeed = priceFeed;
+    this.jupiterClient = jupiterClient;
+    this.aiAdvisor = aiAdvisor;
   }
 
   /** Return current pool mint, or null if not configured. */
@@ -726,7 +802,7 @@ export class TradingAgent extends BaseAgent {
 
     return {
       amountSol: amount,
-      programId: DEVNET_FALLBACK_ADDRESS, // System Program (SOL transfer)
+      programId: this.poolMint ? AMM_PROGRAM_ID : DEVNET_FALLBACK_ADDRESS,
       destination: this.targetAddress,
     };
   }
@@ -773,8 +849,8 @@ export class TradingAgent extends BaseAgent {
    * future prompts include outcome history.
    */
   protected processPendingOutcomes(currentPrice: number): void {
-    const resolved: { outcome: 'win' | 'loss'; po: import('../types').PendingOutcome }[] = [];
-    const remaining: import('../types').PendingOutcome[] = [];
+    const resolved: { outcome: 'win' | 'loss'; po: PendingOutcome }[] = [];
+    const remaining: PendingOutcome[] = [];
 
     for (const po of this.pendingOutcomes) {
       po.ticksRemaining -= 1;

@@ -6,13 +6,15 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { BaseAgent } from './base-agent';
-import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
+import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams, PendingOutcome } from '../types';
 import { AgenticWallet } from '../core/wallet';
 import { PriceFeed } from '../integrations/price-feed';
+import { AIAdvisor } from '../integrations/ai-advisor';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SYSTEM_PROGRAM_ADDRESS = '11111111111111111111111111111111';
+const AMM_PROGRAM_ID = 'Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2';
 const REBALANCE_THRESHOLD = 0.10;
 const REBALANCE_TRANSFER_SOL = 0.005;
 const PRICE_HISTORY_MAX = 100;
@@ -47,8 +49,10 @@ export class PortfolioAgent extends BaseAgent {
   // AMM pool integration
   private poolMint: string | null = null;
   private poolAuthority: string | null = null;
+  private cachedTokenPriceInSol: number = 0;
 
-  private readonly priceFeed: PriceFeed;
+  private priceFeed: PriceFeed;
+  private aiAdvisor: AIAdvisor;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super(config, wallet);
@@ -68,6 +72,7 @@ export class PortfolioAgent extends BaseAgent {
     }
 
     this.priceFeed = new PriceFeed();
+    this.aiAdvisor = new AIAdvisor();
   }
 
   // ── OODA: Observe ──────────────────────────────────────────────────────────
@@ -104,12 +109,13 @@ export class PortfolioAgent extends BaseAgent {
 
     // Fetch token balances with real pool price when available
     let tokenValueSol = 0;
-    let tokenPriceInSol = 0.001; // conservative fallback
+    let tokenPriceInSol = this.cachedTokenPriceInSol > 0 ? this.cachedTokenPriceInSol : 0.001;
     if (this.poolMint) {
       try {
         const poolState = await this.wallet.getPoolState(this.poolMint, this.poolAuthority ?? undefined);
         if (poolState && poolState.tokenReserve > 0) {
           tokenPriceInSol = poolState.solReserve / poolState.tokenReserve;
+          this.cachedTokenPriceInSol = tokenPriceInSol;
         }
       } catch {
         // Pool read failed — use fallback
@@ -182,7 +188,13 @@ export class PortfolioAgent extends BaseAgent {
       const regimeScaled = this.applyRegimeScaling(rawConfidence, 'rebalance');
       confidence = this.getCalibrationAdjustment(regimeScaled);
 
-      if (currentAlloc.sol > targetAlloc.sol) {
+      // If we have no tokens AND no pool to acquire them, drift is structural — hold
+      if (currentAlloc.tokens === 0 && !this.poolMint) {
+        action = 'hold';
+        confidence = 0.3;
+        reasoning = `Drift detected (${(drift * 100).toFixed(1)}%) but no pool configured for token acquisition — holding`;
+        reasoningChain.push('[Guard] No pool configured — cannot rebalance to tokens');
+      } else if (currentAlloc.sol > targetAlloc.sol) {
         action = 'rebalance_to_tokens';
         reasoning = `SOL overweight: current ${(currentAlloc.sol * 100).toFixed(1)}% vs target ${(targetAlloc.sol * 100).toFixed(1)}%. Drift ${(drift * 100).toFixed(1)}% exceeds ${(REBALANCE_THRESHOLD * 100).toFixed(1)}% threshold.`;
         reasoningChain.push(`[Action]     Rebalance to tokens — SOL overweight`);
@@ -199,6 +211,43 @@ export class PortfolioAgent extends BaseAgent {
       confidence = 0.3;
       reasoning = `Portfolio within tolerance: drift ${(drift * 100).toFixed(1)}% below ${(REBALANCE_THRESHOLD * 100).toFixed(1)}% threshold.`;
       reasoningChain.push(`[Decision]   HOLD — drift within tolerance`);
+    }
+
+    // ── AI Brain (optional) ──────────────────────────────────────────────
+    try {
+      const aiDecision = await this.aiAdvisor.getAgentDecision({
+        agentName: this.config.name,
+        agentType: 'portfolio_manager',
+        strategy: 'rebalancing',
+        solPrice: observations.price as number,
+        priceSource: 'portfolio_observe',
+        priceHistory: this.priceHistory,
+        marketRegime: this.currentRegime,
+        solBalance: solBalance,
+        tokenBalances: [],
+        totalPortfolioValueSol: this.totalValueSol,
+        quantitativeSignal: {
+          action,
+          confidence,
+          factors: { drift, currentSol: currentAlloc.sol, targetSol: targetAlloc.sol },
+        },
+        poolState: null,
+        jupiterQuote: null,
+        recentDecisions: this.getDecisionHistory().slice(-3).map(d => ({ action: d.action, confidence: d.confidence })),
+        reasoningChain,
+      });
+
+      if (aiDecision) {
+        action = aiDecision.action;
+        confidence = aiDecision.confidence;
+        reasoning = aiDecision.reasoning;
+        reasoningChain.push(`[AI Brain]    Decision: ${aiDecision.action.toUpperCase()} (confidence: ${aiDecision.confidence.toFixed(3)})`);
+        reasoningChain.push(`[AI Brain]    "${aiDecision.reasoning}"`);
+        if (aiDecision.riskAssessment) reasoningChain.push(`[AI Brain]    Risk: "${aiDecision.riskAssessment}"`);
+        if (aiDecision.marketOutlook) reasoningChain.push(`[AI Brain]    Outlook: "${aiDecision.marketOutlook}"`);
+      }
+    } catch {
+      // AI advisor is optional
     }
 
     return {
@@ -303,6 +352,9 @@ export class PortfolioAgent extends BaseAgent {
 
     this.rebalanceCount++;
 
+    let txMeta = { slot: 0, fee: 0, blockTime: null as number | null };
+    try { txMeta = await this.wallet.enrichTransactionResult(signature); } catch { /* best-effort */ }
+
     return {
       id: uuidv4(),
       agentId: this.config.id,
@@ -324,9 +376,9 @@ export class PortfolioAgent extends BaseAgent {
         id: uuidv4(),
         signature,
         status: 'confirmed',
-        slot: 0,
-        blockTime: null,
-        fee: 0,
+        slot: txMeta.slot,
+        blockTime: txMeta.blockTime,
+        fee: txMeta.fee,
         error: null,
         logs: [],
         duration: 0,
@@ -349,6 +401,23 @@ export class PortfolioAgent extends BaseAgent {
     this.queuePendingOutcome(decision, this.currentPrice);
   }
 
+  /** Portfolio-specific outcome evaluation: drift below threshold = success. */
+  protected processPendingOutcomes(_currentPrice: number): void {
+    const remaining: PendingOutcome[] = [];
+    for (const po of this.pendingOutcomes) {
+      po.ticksRemaining -= 1;
+      if (po.ticksRemaining <= 0) {
+        // Rebalancing succeeds when drift returned below threshold
+        const outcome: 'win' | 'loss' = this.drift < 0.10 ? 'win' : 'loss';
+        this.updateWeights(outcome, po.decision);
+        this.recordCalibration(po.confidence, outcome === 'win');
+      } else {
+        remaining.push(po);
+      }
+    }
+    this.pendingOutcomes = remaining;
+  }
+
   // ── Policy Engine ──────────────────────────────────────────────────────────
 
   protected estimateTransactionParams(
@@ -357,7 +426,7 @@ export class PortfolioAgent extends BaseAgent {
     if (decision.action === 'hold') return null;
     return {
       amountSol: REBALANCE_TRANSFER_SOL,
-      programId: SYSTEM_PROGRAM_ADDRESS,
+      programId: this.poolMint ? AMM_PROGRAM_ID : SYSTEM_PROGRAM_ADDRESS,
       destination: this.targetAddress,
     };
   }
@@ -372,6 +441,12 @@ export class PortfolioAgent extends BaseAgent {
   setPoolMint(mint: string, authority?: string): void {
     this.poolMint = mint;
     this.poolAuthority = authority ?? null;
+  }
+
+  /** Inject shared service instances from orchestrator. Avoids duplicate HTTP clients/caches. */
+  setSharedServices(priceFeed: PriceFeed, aiAdvisor: AIAdvisor): void {
+    this.priceFeed = priceFeed;
+    this.aiAdvisor = aiAdvisor;
   }
 
   /** Return current portfolio state for dashboard use. */

@@ -203,4 +203,22 @@ describe('AIAdvisor', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('model ID', () => {
+    it('uses correct model ID for Anthropic calls', async () => {
+      process.env.ANTHROPIC_API_KEY = 'test-key';
+      const advisor = new AIAdvisor();
+
+      mockFetch.mockResolvedValueOnce(
+        anthropicResponse('{"action": "hold", "confidence": 0.5, "reasoning": "test"}'),
+      );
+
+      await advisor.getTradeRecommendation(testContext);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.model).toBe('claude-haiku-4-5');
+      expect(body.model).not.toContain('20251001');
+    });
+  });
 });

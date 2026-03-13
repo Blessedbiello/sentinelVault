@@ -5,8 +5,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { BaseAgent } from './base-agent';
-import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams } from '../types';
+import { AgentConfig, AgentDecision, AgentAction, TransactionValidationParams, AgentDecisionContext, AIDecisionResult } from '../types';
 import { AgenticWallet } from '../core/wallet';
+import { AIAdvisor } from '../integrations/ai-advisor';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ import { AgenticWallet } from '../core/wallet';
  * simulated transfers that represent pool management operations.
  */
 const SYSTEM_PROGRAM_ADDRESS = '11111111111111111111111111111111';
+const AMM_PROGRAM_ID = 'Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2';
 
 /** SOL amount sent for operations that require an on-chain signal. */
 const REBALANCE_TRANSFER_SOL = 0.005;
@@ -70,9 +72,11 @@ export class LiquidityAgent extends BaseAgent {
   private targetAddress: string;
   private poolMint: string | null = null;
   private poolAuthority: string | null = null;
+  private aiAdvisor: AIAdvisor;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super(config, wallet);
+    this.aiAdvisor = new AIAdvisor();
 
     // Resolve destination address from strategy params, falling back to System Program.
     const rawTarget = config.strategy.params.targetAddress;
@@ -231,11 +235,72 @@ export class LiquidityAgent extends BaseAgent {
         `All metrics are within acceptable bounds.`;
     }
 
+    // ── AI Brain Integration ──────────────────────────────────────────────
+    const reasoningChain: string[] = [
+      `[Pool]       TVL: ${(observations.tvl as number).toFixed(4)} SOL | APY: ${apy.toFixed(2)}% | Util: ${utilization.toFixed(1)}%`,
+      `[Imbalance]  ${(imbalance * 100).toFixed(1)}% (threshold: ${(IMBALANCE_REBALANCE_THRESHOLD * 100).toFixed(0)}%)`,
+      `[Quant]      ${action} @ confidence ${confidence.toFixed(3)}`,
+    ];
+
+    let aiDecision: AIDecisionResult | null = null;
+    try {
+      const walletBalance = observations.walletBalanceSol as number;
+      const ctx: AgentDecisionContext = {
+        agentName: this.config.name,
+        agentType: 'liquidity_provider',
+        strategy: this.config.strategy.type,
+        solPrice: (observations.price as number) || 1.0,
+        priceSource: (observations.onChainPool as boolean) ? 'on-chain pool' : 'simulated',
+        priceHistory: [],
+        marketRegime: this.currentRegime,
+        solBalance: walletBalance,
+        tokenBalances: [],
+        totalPortfolioValueSol: walletBalance + (observations.tvl as number),
+        quantitativeSignal: {
+          action,
+          confidence,
+          factors: { imbalance, apy, utilization },
+        },
+        poolState: {
+          solReserve: observations.tokenABalance as number,
+          tokenReserve: observations.tokenBBalance as number,
+          price: (observations.price as number) || 0,
+        },
+        jupiterQuote: null,
+        recentDecisions: this.getDecisionHistory().slice(-3).map(d => ({
+          action: d.action,
+          confidence: d.confidence,
+        })),
+        reasoningChain,
+      };
+
+      aiDecision = await this.aiAdvisor.getAgentDecision(ctx);
+
+      if (aiDecision) {
+        const validActions = new Set(['buy', 'sell', 'hold', 'rebalance', 'add_liquidity', 'remove_liquidity']);
+        if (validActions.has(aiDecision.action)) {
+          action = aiDecision.action;
+        }
+        confidence = aiDecision.confidence;
+        reasoning = aiDecision.reasoning;
+        reasoningChain.push(`[AI Brain]   Decision: ${aiDecision.action.toUpperCase()} (confidence: ${aiDecision.confidence.toFixed(3)})`);
+        reasoningChain.push(`[AI Brain]   "${aiDecision.reasoning}"`);
+        reasoningChain.push(`[AI Brain]   Risk: "${aiDecision.riskAssessment}"`);
+        reasoningChain.push(`[AI Brain]   Outlook: "${aiDecision.marketOutlook}"`);
+      }
+    } catch {
+      // AI advisor is optional — fall through to quantitative decision
+    }
+
     return {
       id: uuidv4(),
       agentId: this.config.id,
       timestamp: Date.now(),
-      marketConditions: { ...observations },
+      marketConditions: {
+        ...observations,
+        reasoningChain,
+        aiDecision: aiDecision ?? null,
+      },
       analysis,
       action,
       confidence,
@@ -326,7 +391,7 @@ export class LiquidityAgent extends BaseAgent {
                 0,
                 this.poolAuthority ?? undefined,
               );
-              liquidityType = 'add_liquidity:swap_sol_for_token';
+              liquidityType = 'market_buy:providing_liquidity'; // addLiquidity() is authority-only; market buy provides passive liquidity
             } catch {
               signature = await this.wallet.transferSOL(
                 this.targetAddress,
@@ -453,6 +518,11 @@ export class LiquidityAgent extends BaseAgent {
     this.poolAuthority = authority ?? null;
   }
 
+  /** Inject shared AI advisor from orchestrator. Avoids duplicate instances. */
+  setAIAdvisor(aiAdvisor: AIAdvisor): void {
+    this.aiAdvisor = aiAdvisor;
+  }
+
   // ── Policy Engine Integration ──────────────────────────────────────────────
 
   /** Estimate transaction params so the policy engine can validate before execution. */
@@ -467,7 +537,7 @@ export class LiquidityAgent extends BaseAgent {
 
     return {
       amountSol,
-      programId: SYSTEM_PROGRAM_ADDRESS, // System Program (SOL transfer)
+      programId: this.poolMint ? AMM_PROGRAM_ID : SYSTEM_PROGRAM_ADDRESS,
       destination: this.targetAddress,
     };
   }
