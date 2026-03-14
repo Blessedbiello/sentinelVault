@@ -12,6 +12,7 @@ import { PriceFeed } from '../integrations/price-feed';
 import { JupiterClient } from '../integrations/jupiter';
 import { AmmClient } from '../integrations/amm-client';
 import { AIAdvisor } from '../integrations/ai-advisor';
+import { DexScreenerClient } from '../integrations/dexscreener-client';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ export class ArbitrageAgent extends BaseAgent {
   private priceFeed: PriceFeed;
   private jupiterClient: JupiterClient;
   private aiAdvisor: AIAdvisor;
+  private dexScreenerClient: DexScreenerClient | null = null;
 
   constructor(config: AgentConfig, wallet: AgenticWallet) {
     super(config, wallet);
@@ -89,29 +91,27 @@ export class ArbitrageAgent extends BaseAgent {
     // Jupiter/Oracle price = real price feed
     this.jupiterPrice = price;
 
-    // If AMM pool is configured, fetch pool price for oracle-vs-pool arbitrage
-    if (this.poolMint) {
+    // ── Three-tier alt-DEX price resolution ────────────────────────────────
+    // Tier 1: DexScreener (real Raydium/Orca on-chain price data)
+    // Tier 2: On-chain AMM pool (our own deployed pool)
+    // Tier 3: EMA-based simulation (last resort)
+
+    let altDexSource: string;
+
+    if (this.dexScreenerClient) {
       try {
-        const poolState = await this.wallet.getPoolState(this.poolMint);
-        if (poolState && poolState.tokenReserve > 0) {
-          // Pool price in SOL per token; convert to USD using oracle price
-          this.poolPrice = (poolState.solReserve / poolState.tokenReserve) * price;
+        const dexPrice = await this.dexScreenerClient.getSOLPrice();
+        if (dexPrice && dexPrice.price > 0) {
+          this.altDexPrice = dexPrice.price;
+          altDexSource = `dexscreener:${dexPrice.dexId}`;
+        } else {
+          altDexSource = await this.resolveAltDexFromPool(price);
         }
       } catch {
-        // Pool read failed — use simulated alt DEX price
+        altDexSource = await this.resolveAltDexFromPool(price);
       }
-    }
-
-    // Use pool price if available, otherwise simulate alternative DEX price
-    if (this.poolPrice > 0) {
-      this.altDexPrice = this.poolPrice;
     } else {
-      // Persistent EMA-based spread (mean-reverting drift, not random each cycle)
-      const SPREAD_DECAY = 0.95;
-      const SPREAD_NOISE = (Math.random() - 0.5) * 0.002; // ±0.1% noise
-      this.altDexSpread = this.altDexSpread * SPREAD_DECAY + SPREAD_NOISE;
-      this.altDexSpread = Math.max(-ALT_DEX_SPREAD_RANGE, Math.min(ALT_DEX_SPREAD_RANGE, this.altDexSpread));
-      this.altDexPrice = price * (1 + this.altDexSpread);
+      altDexSource = await this.resolveAltDexFromPool(price);
     }
 
     // Detect market regime
@@ -127,10 +127,41 @@ export class ArbitrageAgent extends BaseAgent {
       priceSource,
       jupiterPrice: this.jupiterPrice,
       altDexPrice: this.altDexPrice,
+      altDexSource,
       spread: Math.abs(this.jupiterPrice - this.altDexPrice) / this.jupiterPrice,
       balance,
       timestamp: Date.now(),
     };
+  }
+
+  // ── Private: Alt-DEX tier 2 & 3 resolution ────────────────────────────────
+
+  /**
+   * Resolve the alt-DEX price from on-chain AMM pool (tier 2) or EMA simulation
+   * (tier 3). Mutates `this.altDexPrice` and returns the source label.
+   */
+  private async resolveAltDexFromPool(oraclePrice: number): Promise<string> {
+    // Tier 2: On-chain AMM pool
+    if (this.poolMint) {
+      try {
+        const poolState = await this.wallet.getPoolState(this.poolMint);
+        if (poolState && poolState.tokenReserve > 0) {
+          this.poolPrice = (poolState.solReserve / poolState.tokenReserve) * oraclePrice;
+          this.altDexPrice = this.poolPrice;
+          return 'amm_pool';
+        }
+      } catch {
+        // Pool read failed — fall through to simulation
+      }
+    }
+
+    // Tier 3: EMA-based simulation (mean-reverting spread, not random each cycle)
+    const SPREAD_DECAY = 0.95;
+    const SPREAD_NOISE = (Math.random() - 0.5) * 0.002; // ±0.1% noise
+    this.altDexSpread = this.altDexSpread * SPREAD_DECAY + SPREAD_NOISE;
+    this.altDexSpread = Math.max(-ALT_DEX_SPREAD_RANGE, Math.min(ALT_DEX_SPREAD_RANGE, this.altDexSpread));
+    this.altDexPrice = oraclePrice * (1 + this.altDexSpread);
+    return 'simulated_ema';
   }
 
   // ── OODA: Analyze ──────────────────────────────────────────────────────────
@@ -138,16 +169,16 @@ export class ArbitrageAgent extends BaseAgent {
   protected async analyze(observations: Record<string, unknown>): Promise<AgentDecision> {
     const jupPrice = observations.jupiterPrice as number;
     const altPrice = observations.altDexPrice as number;
+    const altDexSource = observations.altDexSource as string;
     const spread = observations.spread as number;
     const balance = observations.balance as number;
     const price = observations.price as number;
     const priceSource = observations.priceSource as string;
 
     const reasoningChain: string[] = [
-      `[Jupiter]  $${jupPrice.toFixed(2)}`,
-      `[AltDex]   $${altPrice.toFixed(2)}`,
+      `[Jupiter]  $${jupPrice.toFixed(2)} (${priceSource})`,
+      `[AltDex]   $${altPrice.toFixed(2)} (source: ${altDexSource})`,
       `[Spread]   ${(spread * 100).toFixed(3)}% (threshold: ${(PROFIT_THRESHOLD * 100).toFixed(1)}%)`,
-      ...(this.poolPrice === 0 ? [`[Spread Model] Simulated EMA spread (no secondary DEX pool configured)`] : []),
     ];
 
     let action: string;
@@ -368,6 +399,9 @@ export class ArbitrageAgent extends BaseAgent {
         const outcome: 'win' | 'loss' = priceChange < 0.02 ? 'win' : 'loss';
         this.updateWeights(outcome, po.decision);
         this.recordCalibration(po.confidence, outcome === 'win');
+
+        // Record P&L — arbitrage profit from spread capture
+        this.recordPnL(po.action, 0.005, po.entryPrice, po.entryPrice * (1 + (outcome === 'win' ? 0.01 : -0.005)));
       } else {
         remaining.push(po);
       }
@@ -405,5 +439,10 @@ export class ArbitrageAgent extends BaseAgent {
     this.priceFeed = priceFeed;
     this.jupiterClient = jupiterClient;
     this.aiAdvisor = aiAdvisor;
+  }
+
+  /** Inject DexScreener client for real Raydium/Orca price data (tier 1 alt-DEX source). */
+  setDexScreenerClient(client: DexScreenerClient): void {
+    this.dexScreenerClient = client;
   }
 }

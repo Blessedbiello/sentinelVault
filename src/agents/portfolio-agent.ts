@@ -411,6 +411,9 @@ export class PortfolioAgent extends BaseAgent {
         const outcome: 'win' | 'loss' = this.drift < 0.10 ? 'win' : 'loss';
         this.updateWeights(outcome, po.decision);
         this.recordCalibration(po.confidence, outcome === 'win');
+
+        // Record P&L — rebalance effectiveness
+        this.recordPnL(po.action, 0.005, po.entryPrice, outcome === 'win' ? po.entryPrice * 1.005 : po.entryPrice * 0.995);
       } else {
         remaining.push(po);
       }

@@ -872,6 +872,10 @@ export class TradingAgent extends BaseAgent {
       this.updateWeights(outcome, po.decision);
       this.recordCalibration(po.confidence, outcome === 'win');
 
+      // Record P&L for the resolved outcome
+      const pnlAmount = (po.decision.marketConditions.balance as number) * 0.1 || 0.005;
+      this.recordPnL(po.action, pnlAmount, po.entryPrice, currentPrice);
+
       // Wire AI advisor feedback loop
       try {
         this.aiAdvisor.recordOutcome(outcome);

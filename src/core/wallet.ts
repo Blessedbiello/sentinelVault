@@ -37,6 +37,7 @@ import {
   TokenBalance,
   TransactionValidationParams,
   PoolState,
+  ValidationResult,
 } from '../types';
 
 /** Memo Program v2 address. */
@@ -236,7 +237,7 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
     }
 
     // Policy gate FIRST — before any transfer path
-    this.enforcePolicy({
+    const policyResult = this.enforcePolicy({
       amountSol,
       destination,
       programId: SYSTEM_PROGRAM_ADDRESS,
@@ -276,6 +277,14 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
     const transaction = new Transaction().add(
       SystemProgram.transfer({ fromPubkey, toPubkey, lamports }),
     );
+
+    // Preflight simulation — run before signing when policy requires it
+    if (policyResult?.simulationRequired) {
+      const simResult = await this.simulateTransaction(transaction);
+      if (!simResult.success) {
+        throw new Error(`Preflight simulation failed: ${simResult.error}`);
+      }
+    }
 
     const signature = await this.signAndSendTransaction(transaction);
 
@@ -1032,7 +1041,7 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   ): Promise<string> {
     this.assertReady();
 
-    this.enforcePolicy({
+    const policyResult = this.enforcePolicy({
       amountSol: solIn / LAMPORTS_PER_SOL,
       programId: VAULT_PROGRAM_ID.toBase58(),
       type: 'swap_sol_for_token',
@@ -1063,6 +1072,15 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       );
 
       const transaction = new Transaction().add(ix);
+
+      // Preflight simulation — run before signing when policy requires it
+      if (policyResult?.simulationRequired) {
+        const simResult = await this.simulateTransaction(transaction);
+        if (!simResult.success) {
+          throw new Error(`Preflight simulation failed: ${simResult.error}`);
+        }
+      }
+
       const signature = await this.signAndSendTransaction(transaction);
 
       if (this.policyEngine) {
@@ -1098,7 +1116,7 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
   ): Promise<string> {
     this.assertReady();
 
-    this.enforcePolicy({
+    const policyResult = this.enforcePolicy({
       amountSol: 0,
       programId: VAULT_PROGRAM_ID.toBase58(),
       type: 'swap_token_for_sol',
@@ -1129,6 +1147,15 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       );
 
       const transaction = new Transaction().add(ix);
+
+      // Preflight simulation — run before signing when policy requires it
+      if (policyResult?.simulationRequired) {
+        const simResult = await this.simulateTransaction(transaction);
+        if (!simResult.success) {
+          throw new Error(`Preflight simulation failed: ${simResult.error}`);
+        }
+      }
+
       const signature = await this.signAndSendTransaction(transaction);
 
       return signature;
@@ -1362,17 +1389,50 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
 
   /**
    * Validate a prospective transaction against the attached PolicyEngine.
-   * No-op when no policy engine is set. Throws on policy violation so that
-   * callers never need to check a return value.
+   * No-op when no policy engine is set (returns null). Throws on policy
+   * violation so callers never need to check a return value — but the
+   * ValidationResult is returned on success so callers can inspect
+   * `simulationRequired` without re-running the chain.
    */
-  private enforcePolicy(params: TransactionValidationParams): void {
-    if (!this.policyEngine) return;
+  private enforcePolicy(params: TransactionValidationParams): ValidationResult | null {
+    if (!this.policyEngine) return null;
 
     const result = this.policyEngine.validateTransaction(params);
     if (!result.allowed) {
       const error = new Error(`Policy violation: ${result.reason}`);
       this.emit('transaction:failed', error, 'policy_violation');
       throw error;
+    }
+
+    return result;
+  }
+
+  /**
+   * Run a preflight simulation against the RPC node for a given transaction.
+   * Passes an empty signers array so the RPC does not attempt signature
+   * verification — the transaction need not be signed at this point.
+   *
+   * @returns Simulation outcome — callers should throw when `success` is false.
+   */
+  async simulateTransaction(tx: Transaction): Promise<{ success: boolean; logs: string[]; unitsConsumed: number; error: string | null }> {
+    try {
+      // Legacy Transaction overload: simulateTransaction(tx, signers?, includeAccounts?)
+      // Passing an empty signers array skips signature verification.
+      const result = await this.connection!.simulateTransaction(tx);
+      return {
+        success: result.value.err === null,
+        logs: result.value.logs ?? [],
+        unitsConsumed: result.value.unitsConsumed ?? 0,
+        error: result.value.err ? JSON.stringify(result.value.err) : null,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        logs: [],
+        unitsConsumed: 0,
+        error: message,
+      };
     }
   }
 

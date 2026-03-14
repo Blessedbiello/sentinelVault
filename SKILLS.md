@@ -1,126 +1,194 @@
 # SentinelVault -- Agent-Readable Capabilities Document
 
 This document is intended for AI agents and LLMs that need to understand,
-integrate with, or operate the SentinelVault framework programmatically.
+integrate with, or operate the SentinelVault agentic wallet programmatically.
 
 ---
 
-## Capabilities Overview
+## What Is SentinelVault?
 
-SentinelVault is an autonomous AI agent wallet framework for Solana. It provides:
+SentinelVault is an **agentic wallet for Solana** -- a wallet designed specifically for AI agents to control. It can create wallets programmatically, sign transactions automatically, hold SOL and SPL tokens, and interact with on-chain protocols -- all without human intervention.
 
-- **Encrypted wallet management** -- Create, fund, lock/unlock Solana wallets with AES-256-GCM encrypted keystores. Private keys are decrypted on demand and wiped from memory immediately after use.
-- **SPL token operations** -- Create token mints, mint tokens, transfer tokens between agent wallets, and query token balances using `@solana/spl-token`.
-- **Protocol interaction (Memo + Stake Program)** -- Write on-chain memos via the Solana Memo Program v2 and delegate SOL to validators via the native Stake Program, demonstrating dApp/protocol interaction beyond simple SOL transfers.
-- **On-chain constant-product AMM** -- Custom AMM program deployed on devnet (`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`) with `create_pool`, `add_liquidity`, `swap_sol_for_token`, and `swap_token_for_sol` instructions. Agents execute real on-chain swaps through the AMM pool, with automatic fallback to SOL transfers if no pool is configured or a swap fails.
-- **Agent-to-agent interaction** -- Agents can target each other's wallets for inter-agent SOL and token transfers, enabling cooperative multi-agent strategies.
-- **Real price feeds** -- SOL/USD from Pyth Network oracle (via Hermes) with Jupiter Price API V2 and CoinGecko fallbacks. Pyth prices include confidence intervals. Cached for 30s. Graceful fallback to simulated prices when APIs are unreachable.
-- **Jupiter DEX quotes** -- Real Jupiter V6 swap quotes (SOL → USDC) showing route plan, price impact, and output amount. Demonstrates DEX awareness for mainnet readiness.
-- **Optional AI/LLM advisor** -- When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, blends LLM recommendations with quantitative signal (60/40 split). Graceful no-op when unavailable.
-- **Multi-factor AI decisions** -- TradingAgent uses a four-factor scoring system (trend, momentum, volatility, balance) with explainable reasoning chains.
-- **Autonomous agent orchestration** -- Spin up multiple independent AI agents, each with its own wallet, security policy, and trading strategy. An orchestrator manages lifecycle, health checks, and metrics aggregation.
-- **OODA decision loop** -- Every agent runs a continuous Observe-Orient-Decide-Act cycle. Concrete strategies (DCA, momentum, mean reversion, liquidity provision) are pluggable via abstract method overrides.
-- **Native SOL staking** -- Agents can autonomously delegate idle SOL to validators via `wallet.stakeSOL()`, using the native Stake Program with proper rent-exempt account creation and delegation.
-- **On-chain vault program** -- Custom Anchor program deployed on devnet (`Frdq7Ro6txmf5YuWLiCuKyVrSiY1tmFDCtTU6CfxQub2`). PDA-based vaults with `initialize_vault`, `deposit`, and `withdraw` instructions. TypeScript client constructs raw Anchor instructions without `@coral-xyz/anchor` runtime dependency.
-- **8-layer security policy engine** -- All outbound transactions pass through a configurable chain of validation checks before reaching the network. Default allowlist includes System Program, SPL Token, AToken, Memo v2, Jupiter V6, Stake Program, and the SentinelVault on-chain program.
-- **Real-time dashboard** -- HTML dashboard + REST API + WebSocket push server for monitoring agent states, system metrics, audit logs, and alerts. Open http://localhost:3000 in a browser.
-- **Full audit trail** -- Every wallet operation, agent decision, security event, and transaction is logged with risk scores and queryable filters.
-- **CLI interface** -- Command-line tool for status checks, agent management, and wallet operations.
+**The wallet is the product. The agents are demonstrations.**
+
+Any AI agent, trading bot, or automation script can use the wallet directly. No orchestrator, OODA loop, or SentinelVault agent is required. Import the wallet, initialize it, and start transacting.
 
 ---
 
-## API Examples (TypeScript)
+## Quick Start: Use the Wallet in Your Own Agent
 
-### Create and initialize a wallet
+### Minimum Integration (6 lines)
 
 ```typescript
 import { AgenticWallet } from 'sentinel-vault';
 
 const wallet = new AgenticWallet({
-  id: 'wallet-001',
-  label: 'Trading Wallet',
-  password: 'strong-passphrase',
+  id: 'your-agent-id',
+  label: 'Your Agent Name',
+  password: 'your-secure-password',
   cluster: 'devnet',
 });
+await wallet.initialize();                            // creates keypair, encrypts it
+await wallet.requestAirdrop(1);                       // fund on devnet
+await wallet.transferSOL(destination, 0.1);           // auto-signs, no human needed
+```
 
+That's it. Your agent now has a fully functional Solana wallet with encrypted key storage and automatic transaction signing.
+
+### Add Security (Optional)
+
+```typescript
+import { AgenticWallet, PolicyEngine } from 'sentinel-vault';
+
+const wallet = new AgenticWallet({ id: 'bot', label: 'Bot', password: 'pw', cluster: 'devnet' });
 await wallet.initialize();
-await wallet.requestAirdrop(1); // 1 SOL on devnet
-const balance = await wallet.getBalance();
+
+// Attach spending limits, rate limits, program allowlists
+const policy = PolicyEngine.createDefaultPolicy();
+policy.spendingLimits.perTransaction = 0.5; // max 0.5 SOL per tx
+policy.spendingLimits.daily = 5;            // max 5 SOL per day
+policy.maxTransactionsPerMinute = 5;
+wallet.setPolicyEngine(new PolicyEngine('bot', policy));
+
+// All subsequent wallet calls are now policy-enforced
+await wallet.transferSOL(dest, 0.3); // allowed
+await wallet.transferSOL(dest, 1.0); // BLOCKED: exceeds per-tx limit
 ```
 
-### SPL token operations
+### Listen to Events
 
 ```typescript
-// Create a new SPL token mint (wallet owner = mint authority + freeze authority)
-const mintAddress = await wallet.createTokenMint(9); // 9 decimals
-
-// Mint tokens to your own associated token account
-await wallet.mintTokens(mintAddress, 1_000_000 * 10 ** 9); // 1M tokens
-
-// Transfer tokens to another wallet (creates destination ATA if needed)
-await wallet.transferToken(mintAddress, destinationPublicKey, 500_000 * 10 ** 9);
-
-// Query all SPL token balances
-const tokens = await wallet.getTokenBalances();
-// Returns: TokenBalance[] with { mint, symbol, balance, decimals, uiBalance }
+wallet.on('transaction:confirmed', (sig) => console.log('Confirmed:', sig));
+wallet.on('transaction:failed', (err) => console.error('Failed:', err.message));
+wallet.on('wallet:funded', (sig, sol) => console.log(`Funded: ${sol} SOL`));
 ```
 
-### AMM pool operations
+---
 
-```typescript
-import { AmmClient } from 'sentinel-vault';
+## Complete Wallet API
 
-// Create an AMM pool for a token mint
-const { poolPda, signature } = await wallet.createAmmPool(tokenMintAddress);
+These are all public methods on `AgenticWallet`. Each one auto-decrypts the private key, signs the transaction, submits to Solana, and wipes the key from memory -- all in one call.
 
-// Add liquidity to the pool
-await wallet.addLiquidity(tokenMintAddress, 0.5, 1000); // 0.5 SOL + 1000 tokens
+### Core Operations
 
-// Swap SOL for tokens through the AMM
-await wallet.swapSolForToken(tokenMintAddress, 0.1); // swap 0.1 SOL
+| Method | Description |
+|---|---|
+| `initialize()` | Generate keypair, encrypt with AES-256-GCM, store in keystore |
+| `getBalance()` | Current SOL balance (number) |
+| `getPublicKey()` | Wallet public key (base58 string) |
+| `getState()` | Full wallet state snapshot (id, label, publicKey, balance, cluster) |
+| `getConnection()` | Underlying Solana RPC connection |
+| `getExplorerUrl(signature)` | Solana Explorer link for any transaction |
 
-// Swap tokens for SOL through the AMM
-await wallet.swapTokenForSol(tokenMintAddress, 100); // swap 100 tokens
+### SOL Operations
 
-// Query pool state (reserves, fee, price)
-const pool = await wallet.getPoolState(tokenMintAddress);
-// Returns: { solReserve, tokenReserve, feeRate, price }
+| Method | Description |
+|---|---|
+| `requestAirdrop(amountSol)` | Request devnet SOL airdrop |
+| `transferSOL(destination, amountSol)` | Sign and send SOL transfer |
+| `stakeSOL(validatorVote, amountSol)` | Delegate SOL to a validator via Stake Program |
+
+### SPL Token Operations
+
+| Method | Description |
+|---|---|
+| `createTokenMint(decimals)` | Create a new SPL token mint (wallet = authority) |
+| `mintTokens(mint, amount)` | Mint tokens to own associated token account |
+| `transferToken(mint, destination, amount)` | Transfer SPL tokens (auto-creates destination ATA) |
+| `getTokenBalances()` | All SPL token balances: `{ mint, balance, decimals, uiBalance }[]` |
+
+### AMM / DeFi Operations
+
+| Method | Description |
+|---|---|
+| `createAmmPool(tokenMint, feeBps?)` | Create a constant-product AMM pool on-chain |
+| `addLiquidity(tokenMint, solAmount, tokenAmount)` | Add liquidity to AMM pool |
+| `swapSolForToken(mint, lamports, minOut, authority?)` | Swap SOL for tokens on AMM |
+| `swapTokenForSol(mint, tokenAmount, minOut, authority?)` | Swap tokens for SOL on AMM |
+| `getPoolState(mint, authority?)` | Query pool reserves, fee rate, price |
+| `depositToVault(vaultPda, amountSol)` | Deposit SOL into on-chain PDA vault |
+
+### Protocol Interaction
+
+| Method | Description |
+|---|---|
+| `sendMemo(text)` | Write on-chain memo via Solana Memo Program v2 |
+| `submitSerializedTransaction(base64Tx)` | Submit a pre-built transaction (e.g. from Jupiter) |
+| `simulateTransaction(tx)` | Preflight simulation before sending |
+
+### Security & Configuration
+
+| Method | Description |
+|---|---|
+| `setPolicyEngine(engine)` | Attach 8-layer security policy (spending limits, rate limits, allowlists) |
+| `setKoraClient(client)` | Enable gasless transactions via Kora fee abstraction |
+| `enrichTransactionResult(signature)` | Fetch on-chain slot, fee, blockTime for a confirmed tx |
+
+---
+
+## Wallet Architecture
+
+```
+Your AI Agent (any language/framework)
+        |
+        v
+  AgenticWallet  <-- the product
+    |-- KeystoreManager (AES-256-GCM encryption, PBKDF2 key derivation)
+    |-- PolicyEngine (optional: 8-layer security validation)
+    |-- KoraClient (optional: gasless transactions)
+    |-- AmmClient (on-chain AMM instruction builder)
+    |-- EventEmitter (transaction:confirmed, transaction:failed, wallet:funded)
+        |
+        v
+  Solana Network (devnet / testnet / mainnet-beta)
 ```
 
-### On-chain memo (protocol interaction)
+**Key design principle:** The wallet has ZERO dependencies on any agent code. Agents depend on the wallet, never the reverse. This means any external agent, bot, or script can use the wallet without importing or understanding the agent layer.
 
-```typescript
-// Write a memo on-chain via Memo Program v2
-const sig = await wallet.sendMemo('Agent Alpha initialized — strategy: momentum');
-console.log('Explorer:', wallet.getExplorerUrl(sig));
-```
+---
 
-### Native SOL staking
+## Security Model
 
-```typescript
-// Delegate SOL to a validator via the native Stake Program
-const connection = wallet.getConnection();
-const { current } = await connection.getVoteAccounts();
-const validatorVote = current[0].votePubkey;
+### Key Management
 
-const { stakeAccountPubkey, signature } = await wallet.stakeSOL(validatorVote, 1);
-console.log('Stake account:', stakeAccountPubkey);
-console.log('Explorer:', wallet.getExplorerUrl(signature));
-```
+- Private keys encrypted at rest with AES-256-GCM
+- PBKDF2 key derivation: 100,000 iterations, SHA-512, random 32-byte salt
+- Keys decrypted only for signing, wiped from memory immediately after (`buffer.fill(0)` in `finally` blocks)
+- Each wallet has a unique salt and IV -- no key reuse
 
-### Agent-to-agent interaction
+### 8-Layer Policy Engine (Optional)
 
-```typescript
-// Access agent wallets through the orchestrator
-const alphaWallet = orchestrator.getAgentWallet(alphaId);
-const addresses = orchestrator.getAgentWalletAddresses(); // Map<agentId, publicKey>
+When attached via `wallet.setPolicyEngine()`, every outbound transaction passes through:
 
-// Wire agents to target each other
-const betaPublicKey = orchestrator.getAgentWallet(betaId).getPublicKey();
-// Pass as strategy.params.targetAddress when creating the agent
-```
+1. **Circuit breaker** -- Halts after consecutive failures (auto-recovers after 60s)
+2. **Program allowlist** -- Only approved programs (System, SPL Token, Memo, Jupiter, Stake, AMM)
+3. **Address blocklist** -- Reject transactions to blocked destinations
+4. **Per-transaction limit** -- Cap on single transaction amount
+5. **Hourly spending limit** -- Rolling hourly cap
+6. **Daily spending limit** -- Rolling daily cap
+7. **Weekly spending limit** -- Rolling weekly cap
+8. **Rate limits** -- Per-minute, per-hour, per-day transaction count caps
 
-### Create an agent via the orchestrator
+### Transaction Simulation
+
+When `policy.requireSimulation = true`, the wallet runs `connection.simulateTransaction()` before signing and submitting. Failed simulations are rejected before any SOL is spent.
+
+---
+
+## Using the Wallet with the Built-In Agents (Optional)
+
+SentinelVault includes 4 demonstration agents that showcase the wallet in autonomous operation. These are optional -- you don't need them to use the wallet.
+
+### Agent Types
+
+| Type | Class | What It Does |
+|---|---|---|
+| `trader` | `TradingAgent` | DCA / momentum / mean-reversion trading via AMM swaps |
+| `liquidity_provider` | `LiquidityAgent` | Pool monitoring, rebalancing, liquidity management |
+| `arbitrageur` | `ArbitrageAgent` | Cross-DEX price arbitrage (DexScreener + AMM + oracle) |
+| `portfolio_manager` | `PortfolioAgent` | Target allocation rebalancing with drift detection |
+
+### Orchestrator Quick Start
 
 ```typescript
 import { AgentOrchestrator } from 'sentinel-vault';
@@ -144,57 +212,79 @@ const agentId = await orchestrator.createAgent({
 
 // Wire AMM pool to all agents for real swap execution
 orchestrator.setPoolMintForAgents(tokenMintAddress);
+orchestrator.startAll();
 
-orchestrator.startAgent(agentId);
+// Access any agent's wallet
+const wallet = orchestrator.getAgentWallet(agentId);
+const addresses = orchestrator.getAgentWalletAddresses(); // Map<agentId, publicKey>
 ```
 
-### Configure a security policy
+### Inter-Agent Communication
+
+The orchestrator provides:
+- `getAgentWallet(agentId)` -- direct access to any agent's wallet
+- `getAgentWalletAddresses()` -- map of all agent public keys
+- `wireAgentTargetAddresses()` -- round-robin target wiring (Agent A sends to B sends to C sends to A)
+- `broadcastMarketIntelligence()` -- shared market consensus across all agents
+- `getMarketConsensus()` -- majority regime voting, average confidence
+
+---
+
+## Integration Modules
+
+These are standalone clients that your agent can use independently of the wallet:
+
+### Real Price Feeds
 
 ```typescript
-import { PolicyEngine } from 'sentinel-vault';
+import { PriceFeed } from 'sentinel-vault';
 
-const policy = PolicyEngine.createDefaultPolicy();
-// Override specific limits:
-policy.spendingLimits.perTransaction = 0.5;
-policy.spendingLimits.daily = 10;
-policy.maxTransactionsPerMinute = 5;
-
-const engine = new PolicyEngine('agent-001', policy);
-const result = engine.validateTransaction({ amountSol: 0.3 });
-// result.allowed === true
-```
-
-### Real price feeds (Pyth + Jupiter) and DEX quotes
-
-```typescript
-import { PriceFeed, JupiterClient, AIAdvisor } from 'sentinel-vault';
-
-// Fetch real SOL/USD price
 const priceFeed = new PriceFeed();
 const price = await priceFeed.getSOLPrice();
-// Returns: { price: 172.45, source: 'jupiter', timestamp: ... } or null
+// Returns: { price: 172.45, source: 'pyth', timestamp: ..., confidence: 0.12 } or null
+// Priority: Pyth oracle -> Jupiter Price API -> CoinGecko -> null
+```
 
-// Fetch Jupiter DEX swap quote
+### DexScreener (Raydium/Orca Prices)
+
+```typescript
+import { DexScreenerClient } from 'sentinel-vault';
+
+const dex = new DexScreenerClient();
+const price = await dex.getSOLPrice();
+// Returns: { price, source, pairAddress, dexId, liquidity } or null
+```
+
+### Jupiter DEX Quotes
+
+```typescript
+import { JupiterClient } from 'sentinel-vault';
+
 const jupiter = new JupiterClient();
 const quote = await jupiter.getQuote({ amount: 10_000_000 }); // 0.01 SOL in lamports
-// Returns: { inputMint, outputMint, inAmount, outAmount, priceImpactPct, routePlan }
+// Returns: { inAmount, outAmount, priceImpactPct, routePlan }
+```
 
-// Check AI advisor availability
-const advisor = new AIAdvisor(); // reads ANTHROPIC_API_KEY / OPENAI_API_KEY from env
-console.log(advisor.isAvailable()); // true if API key is configured
+### AI/LLM Advisor
+
+```typescript
+import { AIAdvisor } from 'sentinel-vault';
+
+const advisor = new AIAdvisor(); // reads ANTHROPIC_API_KEY or OPENAI_API_KEY from env
+console.log(advisor.isAvailable()); // true if API key configured
 console.log(advisor.getProvider());  // 'anthropic' | 'openai' | null
 ```
 
-### Listen to events
+### Kora Gasless Transactions
 
 ```typescript
-wallet.on('transaction:confirmed', (signature) => {
-  console.log('Confirmed:', signature);
-});
+import { KoraClient } from 'sentinel-vault';
 
-orchestrator.on('agent:created', (agentId, name, type) => {
-  console.log(`Agent ${name} (${type}) created: ${agentId}`);
-});
+const kora = new KoraClient(); // reads KORA_RPC_URL from env
+if (kora.isAvailable()) {
+  const config = await kora.getConfig();
+  // Use with wallet.setKoraClient(kora) for gasless transfers
+}
 ```
 
 ---

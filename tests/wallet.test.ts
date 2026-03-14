@@ -321,4 +321,96 @@ describe('AgenticWallet', () => {
       );
     });
   });
+
+  // ── Transaction Simulation ──────────────────────────────────────────────
+
+  describe('Transaction Simulation', () => {
+    it('simulateTransaction returns success for valid tx', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      // Mock the Connection.simulateTransaction to return a successful result
+      const mockSimulate = jest.fn().mockResolvedValueOnce({
+        value: {
+          err: null,
+          logs: ['Program log: success'],
+          unitsConsumed: 5000,
+          accounts: null,
+          returnData: null,
+        },
+      });
+
+      // Inject the mock into the wallet's internal connection
+      (wallet as any).connection.simulateTransaction = mockSimulate;
+
+      // Build a minimal Transaction object (simulate accepts a Transaction)
+      const { Transaction, SystemProgram, PublicKey } = jest.requireActual('@solana/web3.js');
+      const tx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: new PublicKey(TEST_PUBLIC_KEY),
+          toPubkey: new PublicKey(TEST_PUBLIC_KEY),
+          lamports: 1000,
+        }),
+      );
+
+      const result = await wallet.simulateTransaction(tx);
+      expect(result.success).toBe(true);
+      expect(result.error).toBeNull();
+      expect(result.logs).toContain('Program log: success');
+      expect(result.unitsConsumed).toBe(5000);
+    });
+
+    it('simulateTransaction returns error details on failure', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      const mockSimulate = jest.fn().mockResolvedValueOnce({
+        value: {
+          err: { InstructionError: [0, 'Custom:1'] },
+          logs: ['Program log: failed'],
+          unitsConsumed: 0,
+          accounts: null,
+          returnData: null,
+        },
+      });
+
+      (wallet as any).connection.simulateTransaction = mockSimulate;
+
+      const { Transaction, SystemProgram, PublicKey } = jest.requireActual('@solana/web3.js');
+      const tx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: new PublicKey(TEST_PUBLIC_KEY),
+          toPubkey: new PublicKey(TEST_PUBLIC_KEY),
+          lamports: 1000,
+        }),
+      );
+
+      const result = await wallet.simulateTransaction(tx);
+      expect(result.success).toBe(false);
+      expect(result.error).not.toBeNull();
+      // The error field should contain some representation of the error object
+      expect(result.error).toContain('InstructionError');
+    });
+
+    it('simulateTransaction returns failure when connection throws', async () => {
+      const wallet = createWallet();
+      await wallet.initialize();
+
+      const mockSimulate = jest.fn().mockRejectedValueOnce(new Error('RPC node offline'));
+      (wallet as any).connection.simulateTransaction = mockSimulate;
+
+      const { Transaction, SystemProgram, PublicKey } = jest.requireActual('@solana/web3.js');
+      const tx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: new PublicKey(TEST_PUBLIC_KEY),
+          toPubkey: new PublicKey(TEST_PUBLIC_KEY),
+          lamports: 1000,
+        }),
+      );
+
+      const result = await wallet.simulateTransaction(tx);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('RPC node offline');
+    });
+  });
 });

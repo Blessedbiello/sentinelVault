@@ -17,6 +17,9 @@ import {
   AlertEntry,
   StrategyConfig,
   SecurityPolicy,
+  DexScreenerPrice,
+  MarketConsensus,
+  MarketRegime,
 } from '../types';
 import { BaseAgent } from './base-agent';
 import { TradingAgent } from './trading-agent';
@@ -30,6 +33,7 @@ import { KoraClient } from '../integrations/kora-client';
 import { PriceFeed } from '../integrations/price-feed';
 import { JupiterClient } from '../integrations/jupiter';
 import { AIAdvisor } from '../integrations/ai-advisor';
+import { DexScreenerClient } from '../integrations/dexscreener-client';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -56,6 +60,8 @@ interface OrchestratorEvents {
   'metrics:updated': [metrics: SystemMetrics];
   'pool:updated': [data: unknown];
   'transaction:executed': [data: unknown];
+  'intelligence:updated': [consensus: MarketConsensus];
+  'system:shutdown': [data: { timestamp: number }];
 }
 
 // ─── Agent Registry Entry ─────────────────────────────────────────────────────
@@ -113,6 +119,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly sharedPriceFeed = new PriceFeed();
   private readonly sharedJupiterClient = new JupiterClient();
   private readonly sharedAIAdvisor = new AIAdvisor();
+  private readonly sharedDexScreener = new DexScreenerClient();
 
   // ── Background Intervals ───────────────────────────────────────────────────
 
@@ -228,6 +235,11 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     this.emit('agent:created', agentId, params.name, params.type);
 
+    // Re-wire inter-agent targets when we have enough agents
+    if (this.agents.size >= 2) {
+      this.wireAgentTargetAddresses();
+    }
+
     return agentId;
   }
 
@@ -307,6 +319,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     for (const agentId of this.agents.keys()) {
       this.startAgent(agentId);
     }
+    this.wireAgentTargetAddresses();
   }
 
   /** Stop all registered agents. */
@@ -517,6 +530,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
       state.marketRegime = agent.getMarketRegime();
       state.confidenceCalibration = agent.getConfidenceCalibration();
       state.recentDecisions = agent.getDecisionHistory().slice(-5);
+      state.pnlSummary = agent.getPnLSummary();
       return state;
     });
   }
@@ -549,6 +563,14 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     return {
       available: this.koraClient.isAvailable(),
       rpcUrl: this.koraClient.getRpcUrl(),
+    };
+  }
+
+  /** Return the current DexScreener integration status and last cached price. */
+  getDexScreenerStatus(): { available: boolean; lastPrice: DexScreenerPrice | null } {
+    return {
+      available: this.sharedDexScreener.isAvailable(),
+      lastPrice: this.sharedDexScreener.getCachedPrice(),
     };
   }
 
@@ -590,13 +612,104 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
   }
 
+  // ── Inter-Agent Target Wiring ───────────────────────────────────────────
+
+  /**
+   * Wire agent target addresses in a round-robin loop so that SOL signals
+   * circulate between agents rather than burning to System Program.
+   *
+   * Agent[0] → Agent[1] → ... → Agent[n-1] → Agent[0]
+   */
+  wireAgentTargetAddresses(): void {
+    const entries = Array.from(this.agents.values());
+    if (entries.length < 2) return;
+
+    for (let i = 0; i < entries.length; i++) {
+      const nextIdx = (i + 1) % entries.length;
+      const nextPubkey = entries[nextIdx].wallet.getState()?.publicKey;
+      if (!nextPubkey) continue;
+
+      const agent = entries[i].agent;
+      if (typeof (agent as any).setTargetAddress === 'function') {
+        (agent as any).setTargetAddress(nextPubkey);
+      }
+    }
+  }
+
+  // ── Agent Intelligence Sharing ─────────────────────────────────────────
+
+  /**
+   * Collect regime, confidence, and last action from all agents and compute
+   * a consensus view. The majority regime wins; confidence is averaged.
+   */
+  getMarketConsensus(): MarketConsensus {
+    const signals: MarketConsensus['agentSignals'] = [];
+
+    for (const [agentId, { agent }] of this.agents.entries()) {
+      const regime = agent.getMarketRegime();
+      const lastDecision = agent.getDecisionHistory().slice(-1)[0];
+      signals.push({
+        agentId,
+        regime,
+        confidence: lastDecision?.confidence ?? 0.5,
+        lastAction: lastDecision?.action ?? 'hold',
+      });
+    }
+
+    // Majority regime
+    const regimeCounts = new Map<MarketRegime, number>();
+    for (const s of signals) {
+      regimeCounts.set(s.regime, (regimeCounts.get(s.regime) ?? 0) + 1);
+    }
+    let majorityRegime: MarketRegime = 'quiet';
+    let maxCount = 0;
+    for (const [regime, count] of regimeCounts.entries()) {
+      if (count > maxCount) {
+        majorityRegime = regime;
+        maxCount = count;
+      }
+    }
+
+    const avgConfidence = signals.length > 0
+      ? signals.reduce((s, sig) => s + sig.confidence, 0) / signals.length
+      : 0.5;
+
+    return {
+      regime: majorityRegime,
+      regimeAgreement: signals.length > 0 ? maxCount / signals.length : 0,
+      averageConfidence: avgConfidence,
+      lastUpdate: Date.now(),
+      agentSignals: signals,
+    };
+  }
+
+  /**
+   * Compute market consensus and distribute it to all agents. Called
+   * periodically by the health check timer to keep agents informed of
+   * the collective market view.
+   */
+  broadcastMarketIntelligence(): void {
+    if (this.agents.size === 0) return;
+
+    const consensus = this.getMarketConsensus();
+
+    for (const { agent } of this.agents.values()) {
+      if (typeof (agent as any).setMarketConsensus === 'function') {
+        (agent as any).setMarketConsensus(consensus);
+      }
+    }
+
+    this.emit('intelligence:updated', consensus);
+  }
+
   // ── Shutdown ──────────────────────────────────────────────────────────────
 
   /**
    * Gracefully shut down the orchestrator:
-   *  1. Stop all agent OODA loops.
+   *  1. Stop all agent OODA loops (triggers persistAdaptiveState in each).
    *  2. Stop background health and metrics timers.
    *  3. Flush and close the audit log write stream.
+   *  4. Emit system:shutdown event.
    */
   async shutdown(): Promise<void> {
     this.auditLogger.logSystemEvent('orchestrator:shutdown:initiated', {
@@ -606,6 +719,12 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.stopAll();
     this.stopHealthMonitoring();
     this.auditLogger.close();
+    this.emit('system:shutdown', { timestamp: Date.now() });
+  }
+
+  /** Alias for shutdown — signals graceful teardown with state persistence. */
+  async gracefulShutdown(): Promise<void> {
+    return this.shutdown();
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────────
@@ -630,6 +749,7 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
       case 'arbitrageur': {
         const agent = new ArbitrageAgent(config, wallet);
         agent.setSharedServices(this.sharedPriceFeed, this.sharedJupiterClient, this.sharedAIAdvisor);
+        agent.setDexScreenerClient(this.sharedDexScreener);
         return agent;
       }
 
@@ -789,6 +909,9 @@ export class AgentOrchestrator extends EventEmitter<OrchestratorEvents> {
         }
       }
     }
+
+    // Broadcast market consensus to all agents
+    this.broadcastMarketIntelligence();
   }
 
   /**

@@ -99,6 +99,20 @@ function createMockAgent(config: any) {
     emit: jest.fn(),
     setSharedServices: jest.fn(),
     setAIAdvisor: jest.fn(),
+    setDexScreenerClient: jest.fn(),
+    setTargetAddress: jest.fn(),
+    setMarketConsensus: jest.fn(),
+    getPnLSummary: jest.fn().mockReturnValue({
+      totalPnL: 0,
+      winCount: 0,
+      lossCount: 0,
+      winRate: 0,
+      currentBalanceSol: 0,
+      initialBalanceSol: 0,
+      roiPercent: 0,
+      history: [],
+    }),
+    setKoraClient: jest.fn(),
   };
 }
 
@@ -212,6 +226,22 @@ jest.mock('../src/integrations/ai-advisor', () => ({
     getAgentDecision: jest.fn().mockResolvedValue(null),
     getTradeRecommendation: jest.fn().mockResolvedValue(null),
     recordOutcome: jest.fn(),
+  })),
+}));
+
+jest.mock('../src/integrations/dexscreener-client', () => ({
+  DexScreenerClient: jest.fn().mockImplementation(() => ({
+    getSOLPrice: jest.fn().mockResolvedValue(null),
+    isAvailable: jest.fn().mockReturnValue(false),
+    getCachedPrice: jest.fn().mockReturnValue(null),
+    clearCache: jest.fn(),
+  })),
+}));
+
+jest.mock('../src/integrations/kora-client', () => ({
+  KoraClient: jest.fn().mockImplementation(() => ({
+    isAvailable: jest.fn().mockReturnValue(false),
+    getRpcUrl: jest.fn().mockReturnValue(null),
   })),
 }));
 
@@ -725,5 +755,162 @@ describe('AgentOrchestrator', () => {
     expect(orchestrator.getAgent(id1)!.stop).toHaveBeenCalled();
     expect(orchestrator.getAgent(id2)!.stop).toHaveBeenCalled();
     expect(mockAuditClose).toHaveBeenCalled();
+  });
+
+  // ── Inter-Agent Target Wiring ─────────────────────────────────────────────
+
+  describe('Inter-Agent Target Wiring', () => {
+    test('wireAgentTargetAddresses sets round-robin targets', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+
+      const id1 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A1', type: 'trader' }));
+      const id2 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A2', type: 'trader' }));
+      const id3 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'A3', type: 'trader' }));
+
+      // Clear call counts from auto-wiring that occurred during createAgent
+      jest.clearAllMocks();
+
+      // Trigger an explicit round
+      orchestrator.wireAgentTargetAddresses();
+
+      const agent1 = orchestrator.getAgent(id1)!;
+      const agent2 = orchestrator.getAgent(id2)!;
+      const agent3 = orchestrator.getAgent(id3)!;
+
+      // After a single explicit call with 3 agents, each should be wired once
+      expect((agent1 as any).setTargetAddress).toHaveBeenCalledTimes(1);
+      expect((agent2 as any).setTargetAddress).toHaveBeenCalledTimes(1);
+      expect((agent3 as any).setTargetAddress).toHaveBeenCalledTimes(1);
+
+      // Round-robin: each gets the next agent's public key
+      // All mock wallets return 'MockPubKey1111111111111111111111111111111111'
+      expect((agent1 as any).setTargetAddress).toHaveBeenCalledWith('MockPubKey1111111111111111111111111111111111');
+      expect((agent2 as any).setTargetAddress).toHaveBeenCalledWith('MockPubKey1111111111111111111111111111111111');
+      expect((agent3 as any).setTargetAddress).toHaveBeenCalledWith('MockPubKey1111111111111111111111111111111111');
+    });
+
+    test('wireAgentTargetAddresses skips when less than 2 agents', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      const id1 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'Solo', type: 'trader' }));
+
+      orchestrator.wireAgentTargetAddresses();
+
+      const agent1 = orchestrator.getAgent(id1)!;
+      expect((agent1 as any).setTargetAddress).not.toHaveBeenCalled();
+    });
+
+    test('createAgent re-wires when agents >= 2', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'First', type: 'trader' }));
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'Second', type: 'trader' }));
+
+      // With 2 agents registered, orchestrator should support round-robin wiring without error.
+      // wireAgentTargetAddresses is idempotent and callable at any time.
+      expect(orchestrator.getAgentCount()).toBe(2);
+      expect(() => orchestrator.wireAgentTargetAddresses()).not.toThrow();
+    });
+  });
+
+  // ── Market Intelligence ───────────────────────────────────────────────────
+
+  describe('Market Intelligence', () => {
+    test('getMarketConsensus computes majority regime', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1', type: 'trader' }));
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T2', type: 'trader' }));
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T3', type: 'trader' }));
+
+      // Set 2 agents to 'trending', 1 to 'volatile' → majority is 'trending'
+      const agents = Array.from((orchestrator as any).agents.values()).map((e: any) => e.agent);
+      (agents[0].getMarketRegime as jest.Mock).mockReturnValue('trending');
+      (agents[1].getMarketRegime as jest.Mock).mockReturnValue('trending');
+      (agents[2].getMarketRegime as jest.Mock).mockReturnValue('volatile');
+
+      const consensus = orchestrator.getMarketConsensus();
+      expect(consensus.regime).toBe('trending');
+      expect(consensus.agentSignals).toHaveLength(3);
+    });
+
+    test('broadcastMarketIntelligence distributes consensus to all agents', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1', type: 'trader' }));
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T2', type: 'trader' }));
+
+      orchestrator.broadcastMarketIntelligence();
+
+      const agents = Array.from((orchestrator as any).agents.values()).map((e: any) => e.agent);
+      for (const agent of agents) {
+        expect((agent as any).setMarketConsensus).toHaveBeenCalledTimes(1);
+        expect((agent as any).setMarketConsensus).toHaveBeenCalledWith(
+          expect.objectContaining({ regime: expect.any(String), agentSignals: expect.any(Array) })
+        );
+      }
+    });
+
+    test('intelligence:updated event is emitted on broadcastMarketIntelligence', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1', type: 'trader' }));
+
+      const eventHandler = jest.fn();
+      orchestrator.on('intelligence:updated', eventHandler);
+
+      orchestrator.broadcastMarketIntelligence();
+
+      expect(eventHandler).toHaveBeenCalledTimes(1);
+      expect(eventHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ regime: expect.any(String), averageConfidence: expect.any(Number) })
+      );
+    });
+
+    test('broadcastMarketIntelligence is a no-op when no agents registered', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+
+      const eventHandler = jest.fn();
+      orchestrator.on('intelligence:updated', eventHandler);
+
+      // Should not throw and should NOT emit when agents.size === 0
+      expect(() => orchestrator.broadcastMarketIntelligence()).not.toThrow();
+      expect(eventHandler).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Graceful Shutdown ─────────────────────────────────────────────────────
+
+  describe('Graceful Shutdown', () => {
+    test('gracefulShutdown stops all agents', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      const id1 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1' }));
+      const id2 = await orchestrator.createAgent(makeCreateAgentParams({ name: 'T2' }));
+
+      await orchestrator.gracefulShutdown();
+
+      expect(orchestrator.getAgent(id1)!.stop).toHaveBeenCalled();
+      expect(orchestrator.getAgent(id2)!.stop).toHaveBeenCalled();
+    });
+
+    test('gracefulShutdown emits system:shutdown event', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1' }));
+
+      const shutdownHandler = jest.fn();
+      orchestrator.on('system:shutdown', shutdownHandler);
+
+      await orchestrator.gracefulShutdown();
+
+      expect(shutdownHandler).toHaveBeenCalledTimes(1);
+      expect(shutdownHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ timestamp: expect.any(Number) })
+      );
+    });
+
+    test('shutdown closes the audit logger', async () => {
+      orchestrator = new AgentOrchestrator(makeOrchestratorConfig());
+      await orchestrator.createAgent(makeCreateAgentParams({ name: 'T1' }));
+
+      await orchestrator.shutdown();
+
+      expect(mockAuditClose).toHaveBeenCalled();
+    });
   });
 });

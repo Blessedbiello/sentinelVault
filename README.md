@@ -102,9 +102,107 @@ Or run locally:
 
 ```bash
 npm install           # Install dependencies
-npm test              # Run full test suite (393 tests)
+npm test              # Run full test suite (440 tests)
 npm run demo:showcase # Live demo on Solana devnet (all features)
 ```
+
+---
+
+## Using the Wallet Standalone
+
+The `AgenticWallet` is a **standalone module** with zero dependencies on any agent code. Any AI agent, trading bot, or automation script can import and use it directly -- no orchestrator or OODA loop required.
+
+### 6-Line Integration
+
+```typescript
+import { AgenticWallet } from 'sentinel-vault';
+
+// 1. Create -- generates a Solana keypair, encrypts it with AES-256-GCM
+const wallet = new AgenticWallet({
+  id: 'my-bot-wallet',
+  label: 'My Trading Bot',
+  password: 'your-secure-password',
+  cluster: 'devnet',
+});
+await wallet.initialize();
+
+// 2. Fund
+await wallet.requestAirdrop(1); // 1 SOL on devnet
+
+// 3. Use -- every method signs automatically, no human approval needed
+await wallet.transferSOL('RecipientPublicKeyHere', 0.1);
+await wallet.sendMemo('MY_BOT: executed trade #42');
+const balance = await wallet.getBalance();
+const tokens = await wallet.getTokenBalances();
+```
+
+### Full Wallet API
+
+| Method | Description |
+|---|---|
+| `initialize()` | Create keypair, encrypt, store in keystore |
+| `getBalance()` | Current SOL balance |
+| `getPublicKey()` | Wallet public key (base58) |
+| `transferSOL(to, amount)` | Sign and send SOL transfer |
+| `createTokenMint(decimals)` | Create a new SPL token mint |
+| `mintTokens(mint, amount)` | Mint SPL tokens to own wallet |
+| `transferToken(mint, to, amount)` | Transfer SPL tokens |
+| `getTokenBalances()` | All SPL token balances |
+| `sendMemo(text)` | Write on-chain memo via Memo Program v2 |
+| `stakeSOL(validator, amount)` | Delegate SOL to a validator |
+| `createAmmPool(tokenMint)` | Create a constant-product AMM pool |
+| `addLiquidity(mint, sol, tokens)` | Add liquidity to AMM pool |
+| `swapSolForToken(mint, lamports, minOut)` | Swap SOL for tokens on AMM |
+| `swapTokenForSol(mint, amount, minOut)` | Swap tokens for SOL on AMM |
+| `getPoolState(mint)` | Query AMM pool reserves and price |
+| `depositToVault(vaultPda, amount)` | Deposit SOL into on-chain vault |
+| `setPolicyEngine(engine)` | Attach security policy (optional) |
+| `setKoraClient(client)` | Enable gasless transactions (optional) |
+| `simulateTransaction(tx)` | Preflight simulation before sending |
+| `getExplorerUrl(signature)` | Solana Explorer link for any transaction |
+
+### Security is Built In
+
+Even without the orchestrator, the wallet supports optional security:
+
+```typescript
+import { AgenticWallet, PolicyEngine } from 'sentinel-vault';
+
+const wallet = new AgenticWallet({ id: 'bot', label: 'Bot', password: 'pw', cluster: 'devnet' });
+await wallet.initialize();
+
+// Optional: attach a security policy
+const policy = PolicyEngine.createDefaultPolicy();
+policy.spendingLimits.perTransaction = 0.5; // max 0.5 SOL per tx
+policy.spendingLimits.daily = 5;            // max 5 SOL per day
+wallet.setPolicyEngine(new PolicyEngine('bot', policy));
+
+// Now all wallet operations are policy-enforced automatically
+await wallet.transferSOL(destination, 0.3); // allowed
+await wallet.transferSOL(destination, 1.0); // BLOCKED: exceeds per-tx limit
+```
+
+### Event-Driven Monitoring
+
+The wallet emits events that any consumer can listen to:
+
+```typescript
+wallet.on('transaction:confirmed', (signature) => {
+  console.log('Confirmed:', signature);
+});
+
+wallet.on('transaction:failed', (error) => {
+  console.error('Failed:', error.message);
+});
+
+wallet.on('wallet:funded', (signature, amountSol) => {
+  console.log(`Received ${amountSol} SOL, tx: ${signature}`);
+});
+```
+
+### Why This Matters
+
+The wallet is the product. Our agents (TradingAgent, ArbitrageAgent, etc.) are **demonstrations** of the wallet in action -- they show what an autonomous agent can do when it has a secure, policy-enforced wallet. But the wallet itself is a standalone building block that any Solana AI agent can use.
 
 ---
 
@@ -684,7 +782,7 @@ npx jest --testPathPattern="security"
 
 ### Test Coverage
 
-Run `npm run test:coverage` to see current coverage. The test suite includes 393 tests across 16 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
+Run `npm run test:coverage` to see current coverage. The test suite includes 440 tests across 17 suites covering core wallet operations, security policy engine, audit logging, AMM client operations, all four agent types (trader, liquidity provider, arbitrageur, portfolio manager), adaptive learning with EMA weight updates and deferred evaluation, and the integration layer (price feeds, Jupiter, AI advisor).
 
 ---
 

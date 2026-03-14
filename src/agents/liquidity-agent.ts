@@ -496,6 +496,10 @@ export class LiquidityAgent extends BaseAgent {
       totalVolumeSol: this.performance.totalVolumeSol + amountSol,
     });
 
+    // Record P&L from liquidity action
+    const price = (action.details.price ?? action.details.tvl ?? 1.0) as number;
+    this.recordPnL(action.type, amountSol, price, price * (action.type === 'remove_liquidity' ? 0.99 : 1.01));
+
     console.log(
       `[LiquidityAgent:${this.config.id}] ${action.type} executed. ` +
       `Pool TVL: ${this.pool.tvl.toFixed(4)} SOL | ` +

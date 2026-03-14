@@ -191,6 +191,7 @@ export interface AgentState {
   marketRegime?: MarketRegime;
   confidenceCalibration?: ConfidenceCalibration[];
   recentDecisions?: AgentDecision[];
+  pnlSummary?: PnLSummary;
 }
 
 export interface AgentPerformance {
@@ -275,6 +276,7 @@ export interface ValidationResult {
   allowed: boolean;
   reason?: string;
   violation?: SecurityViolation;
+  simulationRequired?: boolean;
 }
 
 export interface TransactionValidationParams {
@@ -446,6 +448,56 @@ export interface PoolState {
   tokenReserve: number;
   feeBps: number;
   bump: number;
+}
+
+// ─── P&L Tracking Types ──────────────────────────────────────────────────────
+
+export interface PnLEntry {
+  timestamp: number;
+  action: string;
+  amountSol: number;
+  entryPrice: number;
+  exitPrice: number;
+  profitLoss: number;
+  cumulativePnL: number;
+}
+
+export interface PnLSummary {
+  totalPnL: number;
+  winCount: number;
+  lossCount: number;
+  winRate: number;
+  currentBalanceSol: number;
+  initialBalanceSol: number;
+  roiPercent: number;
+  history: PnLEntry[];
+}
+
+// ─── AMM Pool V2 Types ───────────────────────────────────────────────────────
+
+export interface PoolStateV2 extends PoolState {
+  lpMint: string;
+  lpSupply: number;
+}
+
+// ─── DexScreener Types ───────────────────────────────────────────────────────
+
+export interface DexScreenerPrice {
+  price: number;
+  source: string;
+  pairAddress: string;
+  dexId: string;
+  liquidity: number;
+}
+
+// ─── Market Consensus Types ──────────────────────────────────────────────────
+
+export interface MarketConsensus {
+  regime: MarketRegime;
+  regimeAgreement: number;
+  averageConfidence: number;
+  lastUpdate: number;
+  agentSignals: { agentId: string; regime: MarketRegime; confidence: number; lastAction: string }[];
 }
 
 // ─── Event Types ─────────────────────────────────────────────────────────────

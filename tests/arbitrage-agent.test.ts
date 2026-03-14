@@ -431,4 +431,80 @@ describe('ArbitrageAgent', () => {
     expect(agentAny.pendingOutcomes.length).toBe(0);
     expect(agent.getWeightHistory().length).toBeGreaterThanOrEqual(1);
   });
+
+  // ── DexScreener Price Source ──────────────────────────────────────────
+
+  it('uses DexScreener price when available', async () => {
+    const { agent } = await buildAgent();
+    const agentAny = agent as any;
+
+    // Build a minimal DexScreener client mock that returns a valid price
+    const mockDexScreenerPrice = {
+      price: 175.5,
+      source: 'dexscreener:raydium',
+      pairAddress: 'MockPairAddr',
+      dexId: 'raydium',
+      liquidity: 500_000,
+    };
+
+    const mockDexClient = {
+      getSOLPrice: jest.fn().mockResolvedValue(mockDexScreenerPrice),
+      isAvailable: jest.fn().mockReturnValue(true),
+      getCachedPrice: jest.fn().mockReturnValue(mockDexScreenerPrice),
+      clearCache: jest.fn(),
+    };
+
+    agent.setDexScreenerClient(mockDexClient as any);
+
+    // Stub the price feed so the oracle price is predictable
+    agentAny.priceFeed.getSOLPrice = jest.fn().mockResolvedValue({ price: 175, source: 'pyth' });
+
+    const obs = await agentAny.observe();
+
+    // altDexPrice should come from DexScreener
+    expect(obs.altDexPrice).toBe(175.5);
+    expect(obs.altDexSource).toContain('dexscreener');
+    expect(mockDexClient.getSOLPrice).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to AMM pool when DexScreener unavailable', async () => {
+    const { agent } = await buildAgent();
+    const agentAny = agent as any;
+
+    // DexScreener is set to null (not configured)
+    agent.setDexScreenerClient(null as any);
+
+    // Configure an AMM pool
+    agentAny.poolMint = 'TestPoolMint';
+    agentAny.poolAuthority = 'TestPoolAuth';
+
+    // Stub wallet.getPoolState to return a pool with reserves
+    const mockPoolState = { solReserve: 10, tokenReserve: 100, price: 150 };
+    agentAny.wallet.getPoolState = jest.fn().mockResolvedValue(mockPoolState);
+    agentAny.priceFeed.getSOLPrice = jest.fn().mockResolvedValue({ price: 150, source: 'pyth' });
+
+    const obs = await agentAny.observe();
+
+    // Pool price: (solReserve / tokenReserve) * oraclePrice = (10/100)*150 = 15
+    expect(obs.altDexSource).toBe('amm_pool');
+    expect(agentAny.wallet.getPoolState).toHaveBeenCalledWith('TestPoolMint');
+  });
+
+  it('falls back to EMA when both DexScreener and AMM pool are unavailable', async () => {
+    const { agent } = await buildAgent();
+    const agentAny = agent as any;
+
+    // No DexScreener, no pool
+    agentAny.dexScreenerClient = null;
+    agentAny.poolMint = null;
+
+    agentAny.priceFeed.getSOLPrice = jest.fn().mockResolvedValue({ price: 150, source: 'pyth' });
+
+    const obs = await agentAny.observe();
+
+    // Should use EMA simulation
+    expect(obs.altDexSource).toBe('simulated_ema');
+    // altDexSpread must stay within the bounded range
+    expect(Math.abs(agentAny.altDexSpread)).toBeLessThanOrEqual(ALT_DEX_SPREAD_RANGE + 0.01);
+  });
 });

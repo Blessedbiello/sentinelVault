@@ -24,6 +24,7 @@ export { JupiterClient } from './integrations/jupiter';
 export { AIAdvisor } from './integrations/ai-advisor';
 export { AmmClient } from './integrations/amm-client';
 export { KoraClient } from './integrations/kora-client';
+export { DexScreenerClient } from './integrations/dexscreener-client';
 
 // Dashboard
 export { DashboardServer } from './dashboard/server';

@@ -138,6 +138,11 @@ export class PolicyEngine extends EventEmitter<PolicyEngineEvents> {
     const rateResult = this.checkRateLimits();
     if (rateResult !== null) return rateResult;
 
+    // All checks passed. Signal preflight simulation when the policy requires it.
+    if (this.policy.requireSimulation) {
+      return { allowed: true, simulationRequired: true };
+    }
+
     return { allowed: true };
   }
 

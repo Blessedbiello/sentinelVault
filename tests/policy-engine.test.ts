@@ -375,4 +375,37 @@ describe('PolicyEngine', () => {
       expect(lowBalanceAlert).toBeUndefined();
     });
   });
+
+  // ── 21. requireSimulation flag ──────────────────────────────────────────────
+
+  it('validateTransaction sets simulationRequired when policy.requireSimulation=true', () => {
+    engine = new PolicyEngine(
+      'test-agent-001',
+      createTestPolicy({ requireSimulation: true }),
+    );
+
+    const result = engine.validateTransaction({
+      amountSol: 0.1,
+      programId: SYSTEM_PROGRAM_ID,
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.simulationRequired).toBe(true);
+  });
+
+  it('validateTransaction does not set simulationRequired when policy.requireSimulation=false', () => {
+    engine = new PolicyEngine(
+      'test-agent-001',
+      createTestPolicy({ requireSimulation: false }),
+    );
+
+    const result = engine.validateTransaction({
+      amountSol: 0.1,
+      programId: SYSTEM_PROGRAM_ID,
+    });
+
+    expect(result.allowed).toBe(true);
+    // simulationRequired should be falsy (undefined or false) when not required
+    expect(result.simulationRequired).toBeFalsy();
+  });
 });

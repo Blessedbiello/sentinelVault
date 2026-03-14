@@ -2,6 +2,8 @@
 // Abstract base class implementing the OODA (Observe-Orient-Decide-Act) loop
 // for all autonomous AI agents operating over an AgenticWallet on Solana.
 
+import * as fs from 'fs';
+import * as path from 'path';
 import EventEmitter from 'eventemitter3';
 import {
   AgentConfig,
@@ -16,6 +18,9 @@ import {
   MarketRegime,
   ConfidenceCalibration,
   PendingOutcome,
+  PnLEntry,
+  PnLSummary,
+  MarketConsensus,
 } from '../types';
 import { AgenticWallet } from '../core/wallet';
 import { PolicyEngine } from '../security/policy-engine';
@@ -40,6 +45,22 @@ const DEFAULT_WEIGHTS: AdaptiveWeights = { trend: 0.4, momentum: 0.3, volatility
 const WEIGHT_LEARNING_RATE = 0.1;
 const OUTCOME_EVAL_TICKS = 3;
 const MIN_CALIBRATION_SAMPLES = 5;
+const ADAPTIVE_STATE_DIR = '.sentinelvault/adaptive';
+const PERSIST_EVERY_N_DECISIONS = 10;
+const MAX_PNL_HISTORY = 500;
+
+// ─── Internal Persistence Interface ──────────────────────────────────────────
+
+interface PersistedAdaptiveState {
+  version: number;
+  agentId: string;
+  timestamp: number;
+  adaptiveWeights: AdaptiveWeights;
+  calibrationBuckets: Record<string, { total: number; correct: number }>;
+  weightHistory: WeightUpdate[];
+  decisionCount: number;
+  currentRegime: MarketRegime;
+}
 
 // ─── BaseAgent ────────────────────────────────────────────────────────────────
 
@@ -63,6 +84,13 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   protected currentRegime: MarketRegime;
   private confidenceBuckets: Map<string, { total: number; correct: number }>;
   protected pendingOutcomes: PendingOutcome[] = [];
+
+  // P&L tracking
+  protected pnlHistory: PnLEntry[] = [];
+  protected initialBalanceSol: number = 0;
+
+  // Market consensus
+  protected marketConsensus: MarketConsensus | null = null;
 
   private policyEngine: PolicyEngine | null = null;
   private status: AgentStatus;
@@ -202,6 +230,10 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
       if (this.decisionHistory.length > MAX_DECISION_HISTORY) {
         this.decisionHistory.splice(0, this.decisionHistory.length - MAX_DECISION_HISTORY);
       }
+      // Throttled adaptive state persistence
+      if (this.decisionHistory.length % PERSIST_EVERY_N_DECISIONS === 0) {
+        this.persistAdaptiveState();
+      }
       this.emit('agent:decision', decision);
 
       if (action !== null) {
@@ -237,12 +269,21 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   // ── Lifecycle Methods ────────────────────────────────────────────────────────
 
   /**
-   * Start the OODA loop. Sets startedAt, begins executing runCycle on the
-   * configured cooldown interval, and emits 'agent:started'.
+   * Start the OODA loop. Restores persisted adaptive state if available,
+   * records the initial SOL balance for P&L tracking, sets startedAt, begins
+   * executing runCycle on the configured cooldown interval, and emits
+   * 'agent:started'.
    */
   start(): void {
     this.status = 'idle';
     this.startedAt = Date.now();
+
+    // Restore adaptive learning state from disk (best-effort)
+    this.restoreAdaptiveState();
+
+    // Record initial balance for P&L tracking (best-effort, async)
+    void this.wallet.getBalance().then(bal => { this.initialBalanceSol = bal; }).catch(() => {});
+
     this.cycleInterval = setInterval(
       () => void this.runCycle(),
       this.config.strategy.cooldownMs,
@@ -251,10 +292,12 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   }
 
   /**
-   * Stop the OODA loop permanently. Clears the interval, updates status to
-   * 'stopped', and emits 'agent:stopped'. Call start() to begin a fresh run.
+   * Stop the OODA loop permanently. Persists adaptive state to disk, clears
+   * the interval, updates status to 'stopped', and emits 'agent:stopped'.
+   * Call start() to begin a fresh run.
    */
   stop(): void {
+    this.persistAdaptiveState();
     this.clearCycleInterval();
     this.status = 'stopped';
     this.emit('agent:stopped', this.config.id);
@@ -479,8 +522,15 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
   /**
    * Scale confidence based on the current market regime.
    * Trending regimes boost buy/sell confidence; volatile regimes reduce it.
+   * If market consensus disagrees with the local regime, an additional 10%
+   * penalty is applied to reflect the uncertainty.
    */
   protected applyRegimeScaling(confidence: number, action: string): number {
+    // If market consensus disagrees with local regime, reduce confidence
+    if (this.marketConsensus && this.marketConsensus.regime !== this.currentRegime) {
+      confidence = confidence * 0.90;
+    }
+
     switch (this.currentRegime) {
       case 'trending':
         return action !== 'hold' ? confidence * 1.10 : confidence;
@@ -567,6 +617,142 @@ export abstract class BaseAgent extends EventEmitter<AgentEvents> {
    */
   setPolicyEngine(engine: PolicyEngine): void {
     this.policyEngine = engine;
+  }
+
+  // ── Market Consensus ──────────────────────────────────────────────────────
+
+  /**
+   * Provide a cross-agent market consensus snapshot. When set, regime
+   * disagreement will dampen confidence in applyRegimeScaling().
+   */
+  setMarketConsensus(consensus: MarketConsensus): void {
+    this.marketConsensus = consensus;
+  }
+
+  // ── Persistent Adaptive State ─────────────────────────────────────────────
+
+  /**
+   * Persist current adaptive learning state to disk atomically. Writes to a
+   * temp file first, then renames to ensure partial writes do not corrupt
+   * saved state. Silently fails on any I/O error.
+   */
+  persistAdaptiveState(): void {
+    try {
+      const dir = path.resolve(ADAPTIVE_STATE_DIR);
+      fs.mkdirSync(dir, { recursive: true });
+
+      const bucketsObj: Record<string, { total: number; correct: number }> = {};
+      for (const [k, v] of this.confidenceBuckets.entries()) {
+        bucketsObj[k] = v;
+      }
+
+      const state: PersistedAdaptiveState = {
+        version: 1,
+        agentId: this.config.id,
+        timestamp: Date.now(),
+        adaptiveWeights: { ...this.adaptiveWeights },
+        calibrationBuckets: bucketsObj,
+        weightHistory: this.weightHistory.slice(-50),
+        decisionCount: this.decisionHistory.length,
+        currentRegime: this.currentRegime,
+      };
+
+      const tmpFile = path.join(dir, `${this.config.id}.json.tmp`);
+      const finalFile = path.join(dir, `${this.config.id}.json`);
+      fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2), 'utf8');
+      fs.renameSync(tmpFile, finalFile);
+    } catch {
+      // Best-effort: silently ignore I/O errors
+    }
+  }
+
+  /**
+   * Restore adaptive learning state from disk. Validates version, agentId,
+   * and that the weight sum is within 0.01 of 1.0 before applying. Returns
+   * true on successful restore, false on any error or validation failure.
+   */
+  restoreAdaptiveState(): boolean {
+    try {
+      const filePath = path.resolve(ADAPTIVE_STATE_DIR, `${this.config.id}.json`);
+      if (!fs.existsSync(filePath)) return false;
+
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const state = JSON.parse(raw) as PersistedAdaptiveState;
+
+      // Validate integrity
+      if (state.version !== 1) return false;
+      if (state.agentId !== this.config.id) return false;
+      const weightSum = Object.values(state.adaptiveWeights).reduce((s, v) => s + v, 0);
+      if (Math.abs(weightSum - 1.0) > 0.01) return false;
+
+      // Restore state
+      this.adaptiveWeights = { ...state.adaptiveWeights };
+      this.weightHistory = state.weightHistory ?? [];
+      this.currentRegime = state.currentRegime ?? 'quiet';
+
+      this.confidenceBuckets = new Map();
+      for (const [k, v] of Object.entries(state.calibrationBuckets ?? {})) {
+        this.confidenceBuckets.set(k, v);
+      }
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── P&L Tracking ─────────────────────────────────────────────────────────
+
+  /**
+   * Record a P&L entry for a completed trade. profitLoss is computed from the
+   * entry/exit price spread scaled by amountSol, and accumulated into a
+   * running cumulativePnL. History is capped at MAX_PNL_HISTORY entries.
+   */
+  protected recordPnL(action: string, amountSol: number, entryPrice: number, exitPrice: number): void {
+    const profitLoss = action === 'sell'
+      ? (exitPrice - entryPrice) * amountSol / Math.max(entryPrice, 0.0001)
+      : (entryPrice - exitPrice) * amountSol / Math.max(exitPrice, 0.0001);
+
+    const lastCumulative = this.pnlHistory.length > 0
+      ? this.pnlHistory[this.pnlHistory.length - 1].cumulativePnL
+      : 0;
+
+    this.pnlHistory.push({
+      timestamp: Date.now(),
+      action,
+      amountSol,
+      entryPrice,
+      exitPrice,
+      profitLoss,
+      cumulativePnL: lastCumulative + profitLoss,
+    });
+
+    if (this.pnlHistory.length > MAX_PNL_HISTORY) {
+      this.pnlHistory.splice(0, this.pnlHistory.length - MAX_PNL_HISTORY);
+    }
+  }
+
+  /**
+   * Return a summary of all recorded P&L activity: total P&L, win/loss
+   * counts, win rate, ROI relative to initial balance, and the full history
+   * slice. Callers should populate currentBalanceSol after receiving the
+   * summary if a live balance is needed.
+   */
+  getPnLSummary(): PnLSummary {
+    const wins = this.pnlHistory.filter(e => e.profitLoss > 0);
+    const losses = this.pnlHistory.filter(e => e.profitLoss <= 0);
+    const totalPnL = this.pnlHistory.reduce((s, e) => s + e.profitLoss, 0);
+
+    return {
+      totalPnL,
+      winCount: wins.length,
+      lossCount: losses.length,
+      winRate: this.pnlHistory.length > 0 ? wins.length / this.pnlHistory.length : 0,
+      currentBalanceSol: 0, // caller must update
+      initialBalanceSol: this.initialBalanceSol,
+      roiPercent: this.initialBalanceSol > 0 ? (totalPnL / this.initialBalanceSol) * 100 : 0,
+      history: [...this.pnlHistory],
+    };
   }
 
   // ── Protected Helpers ────────────────────────────────────────────────────────
