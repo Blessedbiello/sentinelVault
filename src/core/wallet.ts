@@ -181,6 +181,9 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
       transactionCount: 0,
       status: 'active' as WalletStatus,
     };
+
+    // Hydrate SPL token balances from on-chain state
+    await this.getTokenBalances();
   }
 
   // ── Balance & Token Methods ─────────────────────────────────────────────────

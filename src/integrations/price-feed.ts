@@ -82,15 +82,15 @@ export class PriceFeed {
     // 2. Fallback: Jupiter
     const jupiterPrice = await this.fetchJupiterPrice();
     if (jupiterPrice !== null) {
-      this.cache = { price: jupiterPrice, source: 'jupiter', timestamp: Date.now() };
-      return { price: jupiterPrice, source: 'jupiter', timestamp: Date.now() };
+      this.cache = { price: jupiterPrice, source: 'jupiter', timestamp: Date.now(), confidence: undefined };
+      return { price: jupiterPrice, source: 'jupiter', timestamp: Date.now(), confidence: undefined };
     }
 
     // 3. Fallback: CoinGecko
     const geckoPrice = await this.fetchCoinGeckoPrice();
     if (geckoPrice !== null) {
-      this.cache = { price: geckoPrice, source: 'coingecko', timestamp: Date.now() };
-      return { price: geckoPrice, source: 'coingecko', timestamp: Date.now() };
+      this.cache = { price: geckoPrice, source: 'coingecko', timestamp: Date.now(), confidence: undefined };
+      return { price: geckoPrice, source: 'coingecko', timestamp: Date.now(), confidence: undefined };
     }
 
     return null;

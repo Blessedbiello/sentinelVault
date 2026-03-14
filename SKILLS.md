@@ -106,7 +106,7 @@ These are all public methods on `AgenticWallet`. Each one auto-decrypts the priv
 | `swapSolForToken(mint, lamports, minOut, authority?)` | Swap SOL for tokens on AMM |
 | `swapTokenForSol(mint, tokenAmount, minOut, authority?)` | Swap tokens for SOL on AMM |
 | `getPoolState(mint, authority?)` | Query pool reserves, fee rate, price |
-| `depositToVault(vaultPda, amountSol)` | Deposit SOL into on-chain PDA vault |
+| `depositToVault(agentId, amountSol)` | Deposit SOL into on-chain PDA vault |
 
 ### Protocol Interaction
 
@@ -242,6 +242,7 @@ import { PriceFeed } from 'sentinel-vault';
 const priceFeed = new PriceFeed();
 const price = await priceFeed.getSOLPrice();
 // Returns: { price: 172.45, source: 'pyth', timestamp: ..., confidence: 0.12 } or null
+// Note: confidence is only present for Pyth source; Jupiter/CoinGecko return confidence: undefined
 // Priority: Pyth oracle -> Jupiter Price API -> CoinGecko -> null
 ```
 

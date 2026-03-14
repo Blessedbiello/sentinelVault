@@ -48,6 +48,7 @@ jest.mock('@solana/web3.js', () => {
       getLatestBlockhash: mockGetLatestBlockhash,
       sendRawTransaction: mockSendRawTransaction,
       confirmTransaction: mockConfirmTransaction,
+      getParsedTokenAccountsByOwner: jest.fn().mockResolvedValue({ value: [] }),
     })),
   };
 });
