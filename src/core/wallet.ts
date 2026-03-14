@@ -112,6 +112,15 @@ export class AgenticWallet extends EventEmitter<WalletEvents> {
    * 'wallet:created'. Must be called before any transaction methods.
    */
   async initialize(): Promise<void> {
+    // Load existing keystore if one matches this wallet's label
+    const existing = this.keystoreManager.listKeystores()
+      .find(ks => ks.label === this.config.label);
+
+    if (existing) {
+      await this.initializeFromKeystore(existing.id);
+      return;
+    }
+
     const { publicKey, keystoreId } = await this.keystoreManager.createEncryptedWallet(
       this.password,
       this.config.label,

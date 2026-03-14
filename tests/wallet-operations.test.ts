@@ -20,6 +20,7 @@ jest.mock('../src/core/keystore', () => ({
     createEncryptedWallet: mockCreateEncryptedWallet,
     decryptKeypair: mockDecryptKeypair,
     verifyPassword: mockVerifyPassword,
+    listKeystores: jest.fn().mockReturnValue([]),
   })),
 }));
 

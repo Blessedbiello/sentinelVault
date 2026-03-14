@@ -14,12 +14,14 @@ const mockCreateEncryptedWallet = jest.fn().mockResolvedValue({
 });
 const mockDecryptKeypair = jest.fn().mockReturnValue(testKeypair);
 const mockVerifyPassword = jest.fn().mockReturnValue(true);
+const mockListKeystores = jest.fn().mockReturnValue([]);
 
 jest.mock('../src/core/keystore', () => ({
   KeystoreManager: jest.fn().mockImplementation(() => ({
     createEncryptedWallet: mockCreateEncryptedWallet,
     decryptKeypair: mockDecryptKeypair,
     verifyPassword: mockVerifyPassword,
+    listKeystores: mockListKeystores,
   })),
 }));
 
@@ -411,6 +413,45 @@ describe('AgenticWallet', () => {
       const result = await wallet.simulateTransaction(tx);
       expect(result.success).toBe(false);
       expect(result.error).toBe('RPC node offline');
+    });
+  });
+
+  // ── Wallet Persistence (load-or-create) ─────────────────────────────────────
+
+  describe('wallet persistence', () => {
+    it('should reload existing wallet on second initialize with same label', async () => {
+      // First initialize: no existing keystore, creates new
+      mockListKeystores.mockReturnValue([]);
+      const wallet1 = new AgenticWallet({
+        id: 'w1', label: 'persist-test', password: 'pw', cluster: 'devnet',
+      });
+      await wallet1.initialize();
+      const addr1 = wallet1.getPublicKey();
+
+      // Second initialize: existing keystore found, reloads
+      mockListKeystores.mockReturnValue([
+        { id: 'test-ks-id', label: 'persist-test', cluster: 'devnet', createdAt: Date.now() },
+      ]);
+      const wallet2 = new AgenticWallet({
+        id: 'w2', label: 'persist-test', password: 'pw', cluster: 'devnet',
+      });
+      await wallet2.initialize();
+      const addr2 = wallet2.getPublicKey();
+
+      expect(addr2).toBe(addr1); // Same label → same wallet
+      expect(mockVerifyPassword).toHaveBeenCalledWith('test-ks-id', 'pw');
+    });
+
+    it('should create new wallet when no matching label exists', async () => {
+      mockListKeystores.mockReturnValue([
+        { id: 'other-ks', label: 'different-label', cluster: 'devnet', createdAt: Date.now() },
+      ]);
+      const wallet3 = new AgenticWallet({
+        id: 'w3', label: 'unique-label', password: 'pw', cluster: 'devnet',
+      });
+      await wallet3.initialize();
+
+      expect(mockCreateEncryptedWallet).toHaveBeenCalled();
     });
   });
 });
